@@ -11,6 +11,7 @@
     python ndd.py mate                        # 連接器對接：枚舉所有對應方式並排名
     python ndd.py trace                       # 端到端訊號鏈 CSV
     python ndd.py trace --signal TX_CLK       # 只追一條，印在終端機
+    python ndd.py pinfn LMX2594 8             # 查某腳功能（抽 datasheet 原文並快取）
     python ndd.py datasheets                  # 盤點/下載 datasheet，產生 MISSING.md
     python ndd.py review                      # 產生人工複驗清單 REVIEW.md
     python ndd.py models                      # 列出已查證的腳位模型
@@ -38,6 +39,7 @@ from ndd_bom import Bom                                            # noqa: E402
 from ndd_graph import Fabric                                       # noqa: E402
 from ndd_models import describe, load_models, pairs_for            # noqa: E402
 from ndd_pads import Netlist, refkey                               # noqa: E402
+import ndd_pinfn                                                   # noqa: E402
 
 CONFIG_NAME = "ndd.json"
 
@@ -530,6 +532,22 @@ def cmd_review(args, pj):
     print("寫出 %s" % p)
 
 
+def cmd_pinfn(args, pj):
+    dcfg = pj.cfg.get("datasheets") or {}
+    ddir = os.path.join(pj.dir, dcfg.get("dir", "datasheets"))
+    if args.list:
+        p, rows = ndd_pinfn.load_cache(pj.dir)
+        print("原文快取 %s（%d 筆）" % (p, len(rows)))
+        for r in rows:
+            print("  %-18s pin %-4s %-12s %-8s %s p.%s"
+                  % (r["part"], r["pin"], r["pin_name"], r["direction"],
+                     r["source_file"], r["page"]))
+        return
+    if not args.part or args.pin is None:
+        raise SystemExit("用法：ndd.py pinfn <料號> <腳位> [--file x.pdf]")
+    ndd_pinfn.lookup(pj.dir, ddir, args.part, args.pin, args.file)
+
+
 def cmd_models(args, pj):
     print(describe(pj.models))
 
@@ -554,6 +572,7 @@ def main(argv=None):
     p = sub.add_parser("trace"); p.add_argument("--signal"); p.set_defaults(func=cmd_trace)
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
+    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
     p = sub.add_parser("models"); p.set_defaults(func=cmd_models)
 
     args = ap.parse_args(argv)
