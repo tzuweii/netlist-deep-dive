@@ -37,11 +37,20 @@ python ndd.py export        # pinmap_<board>.csv：逐腳事實表
 python ndd.py audit         # 一致性稽核（含 parser 自我驗證）
 python ndd.py mate          # 連接器對接：枚舉所有對應方式並排名
 python ndd.py trace         # 跨板端到端訊號鏈 CSV
+python ndd.py pinfn LMX2594 8   # 查腳位功能：抽 datasheet 原文並快取
 python ndd.py datasheets    # 盤點/下載 datasheet，產出 MISSING.md
 python ndd.py review        # 產出人工複驗清單 REVIEW.md
 ```
 
 設定檔範例與逐欄說明見 `references/example-ndd.json`。
+
+## 兩種使用方式
+
+**日常問答（不必呼叫 skill）** —— 把「三源對照規約」抄進該專案的 `CLAUDE.md`，
+它每個 session 自動載入，所以每次回答電路問題都會遵守，不需要手動觸發。
+
+**建立新專案 / 完整分析（呼叫 skill）** —— `init` 建設定、`audit` / `mate` /
+`trace` 跑驗證、`review` 產出人工複驗清單。換專案時走一次 Phase 0–6。
 
 ## 設計原則
 
@@ -69,6 +78,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `scripts/ndd.py` | CLI 進入點 |
 | `scripts/ndd_pads.py` | netlist 解析 + 獨立邏輯的自我驗證 |
 | `scripts/ndd_bom.py` | BOM 解析，自動偵測標題列位置 |
+| `scripts/ndd_pinfn.py` | 抽 datasheet 腳位原文並快取（**快取原文，不快取解讀**） |
 | `scripts/ndd_models.py` | 已查證的腳位模型庫（含強制檢查） |
 | `scripts/ndd_graph.py` | 連接器對接排名 + 跨板追跡 |
 | `scripts/ndd_audit.py` | 宣告式斷言引擎 |
