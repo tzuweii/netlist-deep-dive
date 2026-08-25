@@ -1,0 +1,113 @@
+{
+  "_comment": [
+    "ndd.json 範例（去識別化）。真實專案的設定應放在該專案的分析資料夾裡，",
+    "不要放進 skill —— 它會含料號、板名、架構等機敏資訊。",
+    "本範例示範一個常見拓樸：控制板 (ctrl) --排線--> 母板 (mb) --板對板--> 子板 (daughter) x N。"
+  ],
+  "project": "example",
+  "boards": {
+    "ctrl": {
+      "label": "Controller board",
+      "asc": "controller.asc",
+      "bom": "controller_bom.xlsx",
+      "bom_kind": "SMT BOM（不含手插件/機構件）",
+      "ref_col": null
+    },
+    "mb": {
+      "label": "Mother board",
+      "asc": "motherboard.asc",
+      "bom": "motherboard_bom.xlsx",
+      "bom_kind": "完整BOM",
+      "ref_col": null
+    },
+    "daughter": {
+      "label": "Daughter board (同一設計 xN，netlist 只有一份)",
+      "asc": "daughter.asc",
+      "bom": "daughter_bom.xlsx",
+      "bom_kind": "完整BOM",
+      "ref_col": null
+    }
+  },
+
+  "_comment_mates": [
+    "連接器對接。netlist 沒有跨板連線，這裡是唯一的來源。",
+    "同一片子板設計插在母板的 N 個 slot，就把每個 slot 連接器各寫一行。",
+    "填完務必跑 `ndd.py mate` 看排名，不要假設直通。"
+  ],
+  "mates": [
+    ["ctrl", "J1", "mb", "J90"],
+    ["mb", "J101", "daughter", "J2"],
+    ["mb", "J201", "daughter", "J2"]
+  ],
+
+  "_comment_power": [
+    "走圖時排除的電源網路。⚠️ 負向前瞻把 _EN / _PG 排除在外——它們名字帶 VDD",
+    "但其實是控制訊號，被當成電源會導致訊號追不到。專案若有別的命名習慣",
+    "（_CTRL、_SENSE…）要一併處理。"
+  ],
+  "power_net_regex": "^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\\d+V\\d+.*)$",
+
+  "_comment_normalize": [
+    "兩側命名習慣的差異。只剝『階層/slot 後綴』與共通前綴，",
+    "⚠️ 絕對不要剝功能編號（CLK_1 / CLK_2 剝掉數字就無法分辨列互換）。"
+  ],
+  "net_normalize": [["_SLOT_J\\d+$", ""], ["^TX_", ""]],
+
+  "_comment_trace": [
+    "從哪個連接器出發往下追。slot_pattern 用 capture group 取 slot 索引。"
+  ],
+  "trace": {
+    "start": [
+      {"board": "mb", "conn": "J90", "rail": "P"}
+    ],
+    "slot_pattern": "^J(\\d)01$"
+  },
+
+  "_comment_assertions": [
+    "文件寫到哪，斷言就補到哪。首次執行的 FAIL 就是文件的錯——改文件，",
+    "不要改斷言遷就；改完再把斷言改成驗證『更正後的事實』。",
+    "可用 kind 見 references/verification.md。"
+  ],
+  "assertions": [
+    {"board": "mb", "kind": "count_pn", "pn": "SN74CBTLV3126DGVR", "expect": 81,
+     "desc": "bus switch 共 81 顆 (9 slot x 9)"},
+    {"board": "mb", "kind": "pin_net", "refdes": "U939", "pin": "1", "expect": "GND",
+     "desc": "U939 備用開關 OE(pin1) 接地"},
+    {"board": "mb", "kind": "single_pin_nets", "expect": 72,
+     "all_from": "SN74CBTLV3126",
+     "desc": "懸空網路 72 條，且全部出自備用開關（不是訊號鏈上的漏接）"},
+    {"board": "mb", "kind": "not_stuffed", "refdes": ["T902", "T903"],
+     "desc": "T902/T903 為 DNI"},
+    {"board": "mb", "kind": "bom_value", "refdes": "R130", "contains": "634",
+     "desc": "buck RSET = 634 ohm（→ 輸出並非標稱值，需實測確認）"},
+    {"board": "mb", "kind": "i2c_addr", "refdes": "U910", "expect": "0x71",
+     "desc": "I2C mux 位址由 A2/A1/A0 腳反推 = 0x71"},
+    {"board": "daughter", "kind": "pin_net_seq", "refdes": "J3", "pins": "1-16",
+     "expect": "CH_IN{i-1}", "desc": "J3 pin1..16 = CH_IN0..15"},
+    {"board": "daughter", "kind": "net_pin_count", "net": "CLK_1", "expect": 9,
+     "desc": "CLK_1 掛 8 顆 + 連接器 = 9 支腳"}
+  ],
+
+  "_comment_roles": [
+    "把文件裡的通則（U<n>03 這種）展開逐顆比對 BOM 料號。",
+    "⚠️ 通則幾乎一定有例外，查明原因後登錄進 known_exceptions，",
+    "之後重跑會標成『已知例外』而非失敗；新冒出來的才是真的要查。"
+  ],
+  "role_rules": [
+    {
+      "board": "mb", "index": [1, 9], "desc": "母板每 slot 角色",
+      "roles": {
+        "U{n}01": "PAC1954T-E/4MX",
+        "U{n}02": "SN74HCS244QPWRQ1",
+        "U{n}03": "LMZ30606RKGT",
+        "A{n}01": "TMP100NA/3K",
+        "A{n}02": "PTS1206M1B1K00P100"
+      },
+      "known_exceptions": {
+        "A902": "slot 9 的 RTD 因編號被板級感測器佔走而跳號到 A904"
+      }
+    }
+  ],
+
+  "datasheets": {"dir": "datasheets", "parts": []}
+}
