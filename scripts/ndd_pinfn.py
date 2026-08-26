@@ -70,16 +70,84 @@ def find_datasheet(ddir, part, explicit=None):
     if not os.path.isdir(ddir):
         return None
     key = re.sub(r"[^A-Za-z0-9]", "", part.split(",")[0]).lower()
-    best, blen = None, 0
-    for f in os.listdir(ddir):
+    # ⚠️ 只從料號開頭截字串比對，會漏掉「檔名不是以料號開頭」的檔——例如
+    #    SEAF-10-06.5-... 的規格書叫 samtec_SEAF_SEAM.pdf。漏掉會讓人誤以為
+    #    「缺 datasheet」而標 [D 缺]，比找不到更糟。所以額外用料號的
+    #    **開頭字母段**（SEAF / PDW / LMX…）再比對一次。
+    alpha = re.match(r"^[A-Za-z]{3,}", part.split(",")[0])
+    alpha = alpha.group(0).lower() if alpha else ""
+    best, blen, via = None, 0, ""
+    for f in sorted(os.listdir(ddir)):
         if not f.lower().endswith(".pdf"):
             continue
         stem = re.sub(r"[^a-z0-9]", "", os.path.splitext(f)[0].lower())
         for n in range(len(key), 4, -1):
             if key[:n] and key[:n] in stem and n > blen:
-                best, blen = os.path.join(ddir, f), n
+                best, blen, via = os.path.join(ddir, f), n, "料號前綴"
                 break
+    if best is None and len(alpha) >= 4:
+        for f in sorted(os.listdir(ddir)):
+            if f.lower().endswith(".pdf") and alpha in re.sub(
+                    r"[^a-z0-9]", "", os.path.splitext(f)[0].lower()):
+                best, via = os.path.join(ddir, f), "型號字母段 '%s'" % alpha.upper()
+                break
+    # ⚠️ 最後一道：family datasheet 的檔名常列多個型號（AD5627R_5647R_5667R.pdf
+    #    涵蓋 AD5667R；OP184_284_484.pdf 涵蓋 OP284），檔名比對一定漏。漏掉會讓人
+    #    誤標 [D 缺] 並去重買一份已經有的規格書。所以改掃 PDF 內文找型號。
+    if best is None:
+        base = re.sub(r"[^A-Za-z0-9]", "", part.split(",")[0]).upper()
+        for cand in _search_in_text(ddir, base):
+            best, via = cand, "PDF 內文含型號"
+            break
+    if best and via and not via.startswith("料號前綴"):
+        print("   （以 %s 比對到 %s——請確認是同一份規格書）"
+              % (via, os.path.basename(best)))
     return best
+
+
+_TEXT_INDEX = {}          # ddir -> {path: 前幾頁的扁平化內文}
+
+
+def _build_index(ddir, pages=3):
+    """把目錄裡每份 PDF 的前幾頁內文建成索引。**只建一次**——否則每個缺料號
+    都重掃一遍全部 PDF，58 份 × 37 個料號會跑到逾時。"""
+    if ddir in _TEXT_INDEX:
+        return _TEXT_INDEX[ddir]
+    try:
+        from pypdf import PdfReader
+    except ImportError:
+        _TEXT_INDEX[ddir] = {}
+        return {}
+    idx = {}
+    for f in sorted(os.listdir(ddir)):
+        if not f.lower().endswith(".pdf"):
+            continue
+        p = os.path.join(ddir, f)
+        try:
+            r = PdfReader(p)
+            txt = "".join((pg.extract_text() or "") for pg in r.pages[:pages])
+        except Exception:
+            txt = ""
+        idx[p] = re.sub(r"[^A-Za-z0-9]", "", txt).upper()
+    _TEXT_INDEX[ddir] = idx
+    return idx
+
+
+def _search_in_text(ddir, needle):
+    """在 PDF 內文索引裡找型號。只在檔名比對失敗時才呼叫。"""
+    # 由長到短：完整料號 → 去掉常見包裝／封裝後綴
+    keys = [needle]
+    trimmed = re.sub(r"(BCPZ|ACPZ|IDGKR|RGT|RGR|DGVR|PWR|TR\d*|R\d|Z)$", "", needle)
+    if trimmed != needle and len(trimmed) >= 5:
+        keys.append(trimmed)
+    idx = _build_index(ddir)
+    for k in keys:
+        if not k or len(k) < 5:
+            continue
+        for path, flat in idx.items():
+            if k in flat:
+                yield path
+                return
 
 
 def extract(path, pin, max_pages=20):
