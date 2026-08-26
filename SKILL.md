@@ -36,8 +36,22 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 
 ### 五條硬規則
 
-1. **腳位功能一律 `[D]`。** 不得從網路名稱、refdes、封裝或記憶推斷。
-   用 `ndd.py pinfn <料號> <腳位>` 抽 datasheet 原文，成本只有數十 token。
+1. **腳位功能是 `[D]`——但只適用於「訊號穿過」的元件。** 先分級：
+
+   | 級 | 元件 | 判別依據 | datasheet 用於 |
+   |---|---|---|---|
+   | A 連接器／結構件 | SMP、SEAF/SEAM、TFML、T2M | **netlist 連上即事實** | 機構、電流額定 |
+   | B RF 被動網路 | divider、splitter、combiner、coupler、balun、天線 PCB | **腳數 + 上下游網路即拓樸**（1→2、16→1）；`_P`/`_N` 成對即差動 | 損耗、頻寬、耦合量、相位平衡 |
+   | C 純被動 | ferrite、PPTC、RTD、LED | netlist + BOM 值 | 額定、溫漂 |
+   | D 主動 IC，訊號終點 | FPGA、ASIC、EEPROM、振盪器、運放 | netlist + BOM | 功能、暫存器、時序、相位雜訊 |
+   | **E 主動 IC，訊號穿過** | bus switch、buffer、mux、fanout、SPDT | **一律要 datasheet** | — |
+
+   **只有 E 級在追跡前必須有 `[D]`。** A/B 級把拓樸標 `[N]` 並寫出推理，
+   **不要停在 `[D 缺]`**。E 級用 `ndd.py pinfn <料號> <腳位>` 抽原文，成本數十 token。
+
+   ⚠️ 判定「缺」之前要用**全文**複核，不能只比檔名——family datasheet 與型錄類
+   文件必然漏判（`OP284FSZ` 在 `OP184_284_484.pdf`；`PS1608GT2` 在
+   `n_catalog_partition31_en.pdf`）。誤報「缺」會害人重複採購已持有的規格書。
 2. **有無貼件一律 `[B]`。** netlist 有 ≠ 板上有。
 3. **`[?]` 必須寫出定案方式。** 沒有定案路徑的推論不准寫進答案。
 4. **衝突時**：連線→netlist、料號→BOM、腳位功能→datasheet；**且衝突本身要講出來**，
