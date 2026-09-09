@@ -185,12 +185,19 @@ RF 移相器的訊號**永遠通過**，控制位元改變的是相位。標成 
 |---|---|---|
 | `terminal(declared)` | 人工宣告 | 是 |
 | `stateful(declared)` | 人工宣告 | 是 |
+| `driver(model)` | 反向走到 transfer 邊的輸出端 | **否**，那是訊號來源不是負載 |
 | `unknown_stop(declared)` | 人工宣告「可能穿越但沒建模」 | **否**，停在具名位置 |
 | `unknown_stop(model_unusable)` | 有模型但無法使用 | **否**，附原因碼 |
-| `unclassified` | **預設** | 是，但帶 caveat |
+| `unclassified` | **預設** | 是 |
 
 原因碼：`package_unresolved`、`package_conflict`、`model_ambiguous`、`pin_absent`。
 
 ⚠️ `unclassified` **必須**留在輸出裡。若把未宣告的一律排除，絕大多數真實終端
-負載會在被宣告前全部消失，trace 的主要產出就報廢了。**列存在保住可用性，
-caveat 保住誠實。**
+負載會在被宣告前全部消失，trace 的主要產出就報廢了。
+
+⚠️ 但它**不掛 caveat、不降級 `confidence`**。路徑本身由 netlist 完整支持；
+未分類的是「訊號到終點之後會不會繼續走」，那是**覆蓋率缺口**不是路徑證據不足。
+實測一塊真實板子有 96% 的列都是 unclassified——讓它降級等於把「所有主張看起來
+一樣確定」倒過來變成「所有主張看起來一樣不確定」，一樣沒有資訊。
+
+狀態由 `endpoint_kind` 欄呈現，待辦由 `coverage` 與 `REVIEW.md` 列出。

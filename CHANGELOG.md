@@ -10,6 +10,27 @@ git show v1.0.0                        # 該版的完整說明
 
 ---
 
+## v1.3.0 — 範例模型加回來（但不自動載入）
+
+`references/example-models.json` 收了四顆可直接複製的模型（bus switch、buffer、
+clock fanout、I²C mux），全部改寫成有向 schema，`_basis` 欄寫明方向的依據。
+
+```bash
+ndd.py models --examples        # 看有哪些
+ndd.py models --add PCA9547     # 複製進專案的 models.json
+ndd.py models --add all
+```
+
+**不自動載入是刻意的**，而且和「加回來」不衝突：模型是某人對 datasheet 的
+解讀，自動塞進每個專案等於讓使用者在不知情下用別人的解讀去追訊號。複製這個
+動作讓它變成**使用者自己的宣告**，`audit` 與 `REVIEW.md` 才會把它列進要複核
+的清單。
+
+`pin_roles` 全部留空、多數 `package` 也空著——那些要翻 datasheet 才能填，
+不憑印象代填。加入時會印出提醒。
+
+---
+
 ## v1.2.0 — init 一路跑完；標記只出現在真的有問題的地方
 
 `ndd.py init --plan` 只讀不寫、`--run` 依序跑完 8 個步驟並產生所有 `.md`
