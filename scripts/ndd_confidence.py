@@ -35,6 +35,7 @@ CAVEAT_CEILING = {
     "mate:unapproved":            CAVEATED,
     "mate:missing":               UNKNOWN,
     "package:declared_unverified": CAVEATED,
+    "package:inferred":           CAVEATED,   # 由 netlist/BOM 推出，非人工確認
     "package:unresolved":         UNKNOWN,
     "package:conflict":           UNKNOWN,
     "model:ambiguous":            UNKNOWN,

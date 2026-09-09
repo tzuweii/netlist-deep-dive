@@ -40,8 +40,9 @@ from ndd_audit import run_audit                                    # noqa: E402
 from ndd_bom import Bom                                            # noqa: E402
 from ndd_graph import Fabric                                       # noqa: E402
 from ndd_bom import is_ambiguous                                   # noqa: E402
+import ndd_package                                                  # noqa: E402
 from ndd_models import (ModelError, describe, load_models,          # noqa: E402
-                        missing_pins, select_model, transfer_for)
+                        missing_pins, transfer_for)
 from ndd_pads import Netlist, refkey                               # noqa: E402
 import ndd_confidence as C                                         # noqa: E402
 import ndd_graph                                                   # noqa: E402
@@ -226,6 +227,10 @@ def cmd_pins(args, pj):
                 for a_, b_, d_, _e in edges:
                     print("               %s %s %s"
                           % (a_, "->" if d_ == "forward" else "<->", b_))
+            res = ndd_package.resolve(pj.models, nl, bom, b, refdes,
+                                      ndd_graph.Fabric.cls, pkg)
+            if res["status"]:
+                print("   封裝判定  : %s" % ndd_package.describe(res))
             if cav:
                 print("   caveats   : %s" % C.render(cav))
             pins = nl.pins(refdes)
@@ -662,12 +667,17 @@ def cmd_coverage(args, pj):
             else:
                 e["todo"].add("BOM 缺(scope=%s)" % bom.scope)
             pkg = part_pkg.get("%s:%s" % (k, rd)) or part_pkg.get(pn)
-            _name, m, cav = select_model(pj.models, nl.parts.get(rd, ""), pn, pkg)
+            res = ndd_package.resolve(pj.models, nl, bom, k, rd,
+                                      ndd_graph.Fabric.cls, pkg)
+            m, cav = res["model"], res["caveats"]
             declared = eps.get("%s:%s" % (k, rd)) or eps.get(pn)
-            if m is not None and not cav:
+            if m is not None and res["status"] == ndd_package.INFERRED:
+                e["state"].add("modelled[?]")
+                e["todo"].add("複核推論封裝")
+            elif m is not None and not cav:
                 e["state"].add("modelled")
             elif "package:unresolved" in cav:
-                e["state"].add("declared-unmodelled")
+                e["state"].add("package 未定")
                 e["todo"].add("package")
             elif cav:
                 e["state"].add("model_unusable")
@@ -840,7 +850,7 @@ def cmd_pinfn(args, pj):
             declared = pp.get("%s:%s" % (args.board, args.refdes))
         declared = declared or pp.get(part)
     ndd_pinfn.lookup(pj.dir, ddir, part, args.pin, args.file,
-                     observed=observed, declared_package=declared)
+                     package=declared or "", pick=args.pick)
 
 
 def cmd_models(args, pj):
@@ -867,7 +877,7 @@ def main(argv=None):
     p = sub.add_parser("trace"); p.add_argument("--signal"); p.set_defaults(func=cmd_trace)
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
-    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
+    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--pick", type=int); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
     p = sub.add_parser("models"); p.set_defaults(func=cmd_models)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)

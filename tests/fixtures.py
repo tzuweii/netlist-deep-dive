@@ -99,8 +99,10 @@ def buffer_model(mpn="BUF_A", package="PKG24"):
         "match": [mpn],
         "kind": "signal_transfer",
         "package": package,
-        "package_basis": "exact_table",
         "verified_against": "synthetic.pdf p.1",
+        "pin_roles": {"10": "GND", "20": "PWR"},
+        "ordering_suffix": ["PW"],
+        "footprint_match": ["TSSOP", "PKG24"],
         "transfer": [{"from": ["2"], "to": ["18"], "direction": "forward",
                       "gate": {"all_of": ["1"]}}],
         "control": {"1": {"type": "enable", "polarity": "low",
@@ -114,8 +116,8 @@ def switch_model(mpn="SW_A", package="PKG14"):
         "match": [mpn],
         "kind": "signal_transfer",
         "package": package,
-        "package_basis": "exact_table",
         "verified_against": "synthetic.pdf p.2",
+        "pin_roles": {"7": "GND", "14": "PWR"},
         "transfer": [{"from": ["2"], "to": ["3"], "direction": "bidirectional",
                       "gate": {"all_of": ["1"]}}],
         "control": {"1": {"type": "enable", "polarity": "high",
@@ -129,7 +131,6 @@ def fanout_model(mpn="FAN_A", package="PKG20"):
         "match": [mpn],
         "kind": "signal_transfer",
         "package": package,
-        "package_basis": "not_applicable",
         "verified_against": "synthetic.pdf p.3",
         "transfer": [{"from": ["1"], "to": ["3", "5", "7"],
                       "direction": "forward"}],
@@ -143,7 +144,6 @@ def mux_model(mpn="MUX_A", package="PKG24"):
         "match": [mpn],
         "kind": "signal_transfer",
         "package": package,
-        "package_basis": "exact_table",
         "verified_against": "synthetic.pdf p.4",
         "transfer": [{"from": ["20"], "to": ["1", "3"],
                       "direction": "bidirectional",
@@ -162,7 +162,6 @@ def latch_model(mpn="LATCH_A", package="PKG16"):
         "match": [mpn],
         "kind": "stateful",
         "package": package,
-        "package_basis": "exact_table",
         "verified_against": "synthetic.pdf p.5",
         "transfer": [{"from": ["14"], "to": ["9"], "direction": "forward"}],
         "control": {"12": {"type": "trigger", "mechanism": "external"}},
@@ -170,3 +169,20 @@ def latch_model(mpn="LATCH_A", package="PKG16"):
                                "affects": "output_register",
                                "verified_against": "synthetic.pdf p.5"}],
     }
+
+
+def two_package_variants(mpn="EXP_A"):
+    """同一料號的兩個封裝版本，電源腳位置不同 —— 這是拓樸判別力的來源。
+
+    A 版：VSS=8、VDD=16      B 版：VSS=6、VDD=14
+    netlist 只要顯示哪支腳接地／接電源，就足以分辨，**完全不需要 datasheet**。
+    """
+    base = {"match": [mpn], "kind": "signal_transfer",
+            "verified_against": "synthetic.pdf p.1"}
+    a = dict(base, package="PKGA16", pin_roles={"8": "GND", "16": "PWR"},
+             ordering_suffix=["PW"], footprint_match=["TSSOP16"],
+             transfer=[{"from": ["1"], "to": ["4"], "direction": "forward"}])
+    b = dict(base, package="PKGB16", pin_roles={"6": "GND", "14": "PWR"},
+             ordering_suffix=["BS"], footprint_match=["QFN16"],
+             transfer=[{"from": ["15"], "to": ["2"], "direction": "forward"}])
+    return {"EXP_A_PKGA": a, "EXP_A_PKGB": b}

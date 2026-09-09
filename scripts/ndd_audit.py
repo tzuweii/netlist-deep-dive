@@ -17,8 +17,10 @@
 """
 import re
 
+import ndd_package
 from ndd_bom import is_ambiguous
-from ndd_models import i2c_addr, missing_pins, select_model
+from ndd_graph import Fabric
+from ndd_models import i2c_addr, missing_pins
 from ndd_pads import refkey
 
 
@@ -139,50 +141,59 @@ def role_check(nl, bom, rule, out):
 
 
 def model_check(cfg, boards, models, out):
-    """[1.5] 元件模型 —— pin-existence 與 package 解析狀態。
+    """[1.5] 元件模型 —— 封裝判定（只用 netlist/BOM）與 pin-existence。
 
-    ⚠️ pin-existence 是 **sanity check，不是 package 驗證**：兩個封裝同為 1–N
-       而腳位定義不同時它必然通過。它能抓的是打錯、以及照抄了不同衍生型號。
+    ⚠️ pin-existence 是 **sanity check，不是封裝驗證**：兩個封裝同為 1–N 而
+       腳位定義不同時它必然通過。封裝由 `ndd_package` 依證據排名判定，推論
+       出來的一律標 `[?]`。
     """
     part_pkg = cfg.get("part_package") or {}
-    fails, pending = [], []
+    fails, pending, inferred = [], [], []
     for b, (nl, bom) in sorted(boards.items()):
         for rd in sorted(nl.parts, key=refkey):
             pn = bom.pn(rd)
             pn = "" if is_ambiguous(pn) else (pn or "")
-            pkg = part_pkg.get("%s:%s" % (b, rd)) or part_pkg.get(pn)
-            name, m, cav = select_model(models, nl.parts.get(rd, ""), pn, pkg)
-            if "model:ambiguous" in cav:
-                fails.append("%s.%s 多個模型同分命中，無法定案" % (b, rd))
+            declared = part_pkg.get("%s:%s" % (b, rd)) or part_pkg.get(pn)
+            res = ndd_package.resolve(models, nl, bom, b, rd, Fabric.cls,
+                                      declared)
+            if res["status"] is None:
                 continue
-            if "package:conflict" in cav:
-                fails.append("%s.%s 宣告封裝與模型不相容（%s）" % (b, rd, pkg))
+            line = "%s.%s (%s) %s" % (b, rd, pn or "?", ndd_package.describe(res))
+            if res["status"] == ndd_package.CONFLICT:
+                fails.append(line)
                 continue
-            if "package:unresolved" in cav:
-                pending.append("%s.%s (%s) 需指定 package" % (b, rd, pn or "?"))
+            if res["status"] == ndd_package.UNRESOLVED:
+                pending.append(line)
                 continue
-            if m is None:
-                continue
+            if res["status"] == ndd_package.INFERRED:
+                inferred.append(line)
+            m = res["model"]
             miss = missing_pins(m, nl.pins(rd).keys())
             if miss:
                 fails.append("%s.%s 模型 %s 引用的腳 %s 不存在於 netlist"
-                             % (b, rd, name, ",".join(miss)))
+                             % (b, rd, res["name"], ",".join(miss)))
     if not models:
         out.append("  （尚未定義任何模型 —— 追跡會停在每顆主動件）")
     for f in fails:
         out.append("  FAIL %s" % f)
+    for i in inferred:
+        out.append("  [?]  %s" % i)
     for p in pending:
         out.append("  待辦 %s" % p)
-    if models and not fails and not pending:
+    if inferred:
+        out.append("  ** [?] 標記的封裝是由 netlist/BOM **推論**出來的，不是"
+                   "查證過的事實。請人工複核，或填入 ndd.json 的 part_package。**")
+    if models and not fails and not pending and not inferred:
         out.append("  全部通過")
-    return fails, pending
+    return fails, pending, inferred
 
 
 def run_audit(cfg, boards, models):
     """boards: {key: (Netlist, Bom)}。回傳供 review 清單使用的統計。"""
     stats = {"assert_pass": 0, "assert_fail": [], "role_bad": 0, "absent": {},
              "floating": {}, "parser_fail": [], "model_fail": [],
-             "model_pending": [], "bom_dups": {}, "bom_ranges": {}, "ok": True}
+             "model_pending": [], "model_inferred": [], "bom_dups": {},
+             "bom_ranges": {}, "ok": True}
 
     print("=" * 78)
     print("netlist / BOM 一致性稽核")
@@ -229,8 +240,9 @@ def run_audit(cfg, boards, models):
 
     print("\n[1.5] 元件模型（pin-existence 與 package 解析）")
     out = []
-    f, p = model_check(cfg, boards, models, out)
+    f, p, inf = model_check(cfg, boards, models, out)
     stats["model_fail"], stats["model_pending"] = f, p
+    stats["model_inferred"] = inf
     print("\n".join(out))
 
     print("\n[2] refdes 命名規則 vs 實際佈件")
@@ -299,5 +311,10 @@ def run_audit(cfg, boards, models):
     print("稽核結果：%s" % ("PASS" if stats["ok"] else "**FAIL**"))
     if stats["model_pending"]:
         print("待辦 %d 項（不是錯誤，但也**不算通過**）：%s"
-              % (len(stats["model_pending"]), "；".join(stats["model_pending"][:5])))
+              % (len(stats["model_pending"]), "；".join(stats["model_pending"][:3])))
+    if stats["model_inferred"]:
+        print("[?] %d 項封裝是**推論**的，請人工複核："
+              % len(stats["model_inferred"]))
+        for x in stats["model_inferred"][:5]:
+            print("    %s" % x)
     return stats

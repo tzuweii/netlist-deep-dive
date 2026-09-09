@@ -1,8 +1,8 @@
-# 元件模型：transfer 邊、control、hint
+# 元件模型：transfer 邊、control、封裝判定
 
-模型檔是 `<專案>/models.json`。**本 skill 不內建任何 seed model**——通用型工具
-不應把特定料號當成預設知識，而且預先建模等於把「你對 datasheet 的解讀」凍結成
-看不見的永久資產。用到哪顆就自己查證後加哪顆。
+模型檔是 `<專案>/models.json`。**本 skill 不內建 seed model**——通用型工具不應
+把特定料號當成預設知識，而且預先建模等於把「你對 datasheet 的解讀」凍結成看不
+見的永久資產。用到哪顆就自己查證後加哪顆。
 
 ---
 
@@ -23,21 +23,71 @@
 
 ---
 
+## 封裝判定：只用 netlist 與 BOM
+
+**工具不解析 datasheet 的腳位表。** 每家排版都不同（腳註標記、跨行儲存格、
+文字層把兩個腳號併成一個），要通用地「看懂」是無底洞，而且一列錯位就讓整張表
+作廢——實測 NXP 一份 16 腳的表就同時踩到三種。
+
+改用這個工具**已經有的**機制：`mate` 的枚舉排名。三個獨立證據來源：
+
+| 來源 | 標記 | 說明 |
+|---|---|---|
+| **拓樸一致性** | `[N]` | 模型宣告的電源/接地腳，實際是不是接在電源/地上 |
+| 料號後綴 | `[B]` | 訂購碼的封裝碼（`…PW` / `…BS`） |
+| footprint 名稱 | `[N]` | layout 選的實體 footprint |
+
+判別力最強的是第一項：候選封裝之間差最多的通常就是電源腳位置，而 netlist 直接
+就知道哪支腳接地、哪支腳接電源。**只需要知道那幾支腳，不需要整張表。**
+
+### 判定結果
+
+| status | 意義 | 可用？ |
+|---|---|---|
+| `user_confirmed` | `ndd.json` 的 `part_package` 明確宣告 | 可以 |
+| `single_candidate` | 該料號只有一個模型，無從選錯 | 可以 |
+| `inferred` | 證據排名唯一勝出 | 可以，但**一律標 `[?]`** 並帶 `package:inferred` |
+| `unresolved_pending_user` | 證據不足 | **不可以**，列入待補 |
+| `conflict` | 宣告或候選與 netlist 矛盾 | **不可以**，`audit` FAIL |
+
+`inferred` 的門檻：**零矛盾 + 唯一勝出（margin ≥ 2）+ 至少一個獨立來源佐證**。
+達不到就問人，**不得替使用者假設**。
+
+⚠️ 即使使用者明確宣告，若與 netlist 矛盾仍會報 `conflict`——**人講的最大，但
+矛盾要講出來**，不能默默照單全收。
+
+### `pin_roles` 是關鍵欄位
+
+```json
+"pin_roles": {"8": "GND", "16": "PWR"}
+```
+
+建模的人在 datasheet 上看到 VSS/VDD 是哪幾支腳時順手記下來（成本趨近於零），
+工具就能**只用 netlist** 驗證這個封裝對不對得上這塊板。合法值：`GND` / `PWR`
+/ `SIG`。
+
+⚠️ **宣告的 GND/PWR 腳在 netlist 上完全沒接 = 矛盾**，不是「資料不足」。
+訊號腳可以 NC，電源腳不會。這條規則是拓樸判別力的主要來源。
+
+---
+
 ## Schema
 
 ```json
 {
   "MODEL_NAME": {
-    "match": ["EXACT_MPN"],
+    "match": ["BASE_MPN"],
     "kind": "signal_transfer",
-    "package": "PACKAGE_TABLE_HEADER",
-    "package_basis": "exact_table",
+    "package": "自己填的封裝標籤",
     "verified_against": "datasheet.pdf p.7 Table 3（文件編號 rev X）",
+
+    "pin_roles": {"8": "GND", "16": "PWR"},
+    "ordering_suffix": ["PW"],
+    "footprint_match": ["TSSOP16"],
 
     "transfer": [
       {
-        "from": ["2"],
-        "to": ["18"],
+        "from": ["2"], "to": ["18"],
         "direction": "forward",
         "gate": {"all_of": ["1"]},
         "parameter_control": [],
@@ -62,6 +112,13 @@
 }
 ```
 
+`match` 填**基礎料號**即可——比對允許訂購碼後綴（`PCA9554B` 對得上
+`PCA9554BPW`），但多出來的部分必須以**字母**開頭，所以 `LM358` 不會誤中
+`LM3584`。
+
+同一料號有多個封裝版本時，就建多個模型（各自 `package` / `pin_roles` /
+`ordering_suffix` / `footprint_match` 不同），讓證據去分勝負。
+
 ### `direction` — 沒有預設值
 
 | 值 | 用在 |
@@ -69,21 +126,8 @@
 | `forward` | 緩衝器、放大器、fanout、單向轉換 |
 | `bidirectional` | **datasheet 證實雙向**的 FET switch、I²C mux 的 SDA、兩腳被動件 |
 
-⚠️ 任一方向當預設，都會靜默把另一半元件模型錯。載入時強制檢查。
-
-`forward` 邊**只能由 `from` 走到 `to`**。逆向查詢要用獨立模式，不能偷偷反向 BFS。
-
-### `package_basis` — 三選一
-
-| 值 | 意義 | 需要 `package`？ |
-|---|---|---|
-| `exact_table` | 腳位隨封裝改變，本模型對應某一欄 | **是**，且要是欄位標題原文 |
-| `not_applicable` | datasheet 只有一份腳位表 | 否 |
-| `shared_pinout` | 多封裝，但用到的腳功能一致 | 否 |
-
-⚠️ `package` 要填 datasheet 腳位表的**實際欄位標題**（例如 `HVQFN24`），不是
-口語封裝名。這樣才能直接驅動 `pinfn` 的多欄選擇。欄標題會隨改版變動
-（`HVQFN24 (SOT616-1)`），比對用子字串。
+⚠️ 任一方向當預設，都會靜默把另一半元件模型錯。`forward` 邊**只能由 `from`
+走到 `to`**。
 
 ### `control` — 結構化，不是給人看的字串
 
@@ -93,17 +137,13 @@
 | `mechanism` | `strap`（netlist 可解析）/ `runtime` / `external` / `unknown` |
 | `polarity` | `high` / `low`，**只有 `enable` 與 `reset` 可以有** |
 
-`address`、多 bit `select`、參數控制沒有 high/low 之分，強迫填只會產生假資訊。
-
 ### `gate` 與 `parameter_control` 是不同的東西
 
 - `gate` —— 影響**通不通**
 - `parameter_control` —— 影響**通過後的性質**（相位、增益、衰減、頻率）
 
-RF 移相器的訊號**永遠通過**，控制位元改變的是相位。把它標成 `conditional` 會讓
+RF 移相器的訊號**永遠通過**，控制位元改變的是相位。標成 `conditional` 會讓
 讀者理解成「訊號可能過不去」，那是錯的。
-
-`gate` 必須顯式是 `all_of` 或 `any_of`，不可依 list 順序或預設布林邏輯猜測。
 
 ---
 
@@ -122,8 +162,7 @@ RF 移相器的訊號**永遠通過**，控制位元改變的是相位。把它�
 | `enable` 接到**相反**極性的 rail | `conditional`（`tied_inactive`） |
 
 ⚠️ **`type: address` 完全不參與 gating 推導。** 位址決定「是哪一顆」，不決定
-「通不通」。把 address 腳放進 `gate` 會在載入時被拒絕——因為固定位址會被誤推成
-`always`，而通道選擇其實是 runtime 決定的。
+「通不通」。把 address 腳放進 `gate` 會在載入時被拒絕。
 
 ---
 
@@ -139,9 +178,7 @@ RF 移相器的訊號**永遠通過**，控制位元改變的是相位。把它�
 | `unknown_stop(model_unusable)` | 有模型但無法使用 | **否**，附原因碼 |
 | `unclassified` | **預設** | 是，但帶 caveat |
 
-`unknown_stop(model_unusable)` 的原因碼：`package_unresolved`、`package_conflict`、
-`model_ambiguous`、`pin_absent`。「知道它很可能是穿越件、只是無法定案」與「尚未
-分類」是不同狀態，不可混為一談。
+原因碼：`package_unresolved`、`package_conflict`、`model_ambiguous`、`pin_absent`。
 
 ⚠️ `unclassified` **必須**留在輸出裡。若把未宣告的一律排除，絕大多數真實終端
 負載會在被宣告前全部消失，trace 的主要產出就報廢了。**列存在保住可用性，

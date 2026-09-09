@@ -15,6 +15,7 @@ sys.path.insert(0, HERE)
 
 import fixtures                                                # noqa: E402
 import ndd_confidence as C                                     # noqa: E402
+import ndd_package                                             # noqa: E402
 import ndd_pinfn                                               # noqa: E402
 from ndd_bom import Bom, is_ambiguous                          # noqa: E402
 from ndd_graph import (EP_UNCLASSIFIED, EP_UNKNOWN_DECLARED,   # noqa: E402
@@ -163,57 +164,91 @@ class TestMateApproval(unittest.TestCase):
 
 # ===========================================================  Commit 3  ====
 class TestPackageResolution(unittest.TestCase):
-    # legal 是 {封裝欄: {pin: 腳位功能}}。兩個封裝的**功能不同**——這正是常態，
-    # 也是 package 解析要解決的問題；只比 pin label 集合等於把問題當成答案。
-    LEGAL = {"PKGA24": {str(i): "FN_A%d" % i for i in range(1, 25)},
-             "PKGB20": {str(i): "FN_B%d" % i for i in range(1, 21)}}
+    """封裝判定**只用 netlist 與 BOM**，不解析 datasheet 表格。"""
 
-    def test_larger_package_partially_connected_must_not_pick_small(self):
-        """**核心回歸**：24 腳件只接 20 支腳，不得被判成 20 腳封裝。
+    def _board(self, nets, mpn="EXP_A", fp="GENERIC16"):
+        pj = fixtures.Project()
+        pj.board("a", {"U1": fp}, nets,
+                 [{"Part Reference": "U1", "Manufacturer_PN": mpn}],
+                 bom_scope="complete")
+        return pj
 
-        `pins()` 只含已接腳，系統性低估；用腳數判定會穩定偏向較小的封裝。
+    def _resolve(self, pj, models, declared=None):
+        nl = Netlist(pj.path("a.asc"))
+        bom = Bom(pj.path("a.xlsx"), scope="complete")
+        return ndd_package.resolve(models, nl, bom, "a", "U1",
+                                   Fabric.cls, declared)
+
+    def test_topology_alone_picks_the_right_package(self):
+        """電源/接地腳實際接在哪 —— 這是最有判別力的一項，且只需要 netlist。"""
+        pj = self._board({"GND": [("U1", "8")], "VDD_3V3": [("U1", "16")],
+                          "S1": [("U1", "1")], "S2": [("U1", "4")]},
+                         mpn="EXP_APW", fp="TSSOP16_BODY")
+        res = self._resolve(pj, fixtures.two_package_variants())
+        self.assertEqual(res["status"], ndd_package.INFERRED)
+        self.assertEqual(res["model"]["package"], "PKGA16")
+        self.assertIn("package:inferred", res["caveats"],
+                      "推論出來的一定要標記，不能當成事實")
+
+    def test_the_other_package_wins_with_the_other_wiring(self):
+        pj = self._board({"GND": [("U1", "6")], "VDD_3V3": [("U1", "14")],
+                          "S1": [("U1", "15")], "S2": [("U1", "2")]},
+                         mpn="EXP_ABS", fp="QFN16_3X3")
+        res = self._resolve(pj, fixtures.two_package_variants())
+        self.assertEqual(res["status"], ndd_package.INFERRED)
+        self.assertEqual(res["model"]["package"], "PKGB16")
+
+    def test_no_evidence_means_ask_the_user(self):
+        """證據不足時**不得替使用者假設** —— 標 [?] 並列入待補。"""
+        pj = self._board({"S1": [("U1", "1")], "S2": [("U1", "4")]},
+                         mpn="EXP_A", fp="GENERIC16")
+        res = self._resolve(pj, fixtures.two_package_variants())
+        self.assertEqual(res["status"], ndd_package.UNRESOLVED)
+        self.assertIn("package:unresolved", res["caveats"])
+        self.assertIn("[?]", ndd_package.describe(res))
+
+    def test_explicit_declaration_beats_inference(self):
+        pj = self._board({"GND": [("U1", "8")], "VDD_3V3": [("U1", "16")]},
+                         mpn="EXP_A")
+        res = self._resolve(pj, fixtures.two_package_variants(), declared="PKGA16")
+        self.assertEqual(res["status"], ndd_package.USER_CONFIRMED)
+        self.assertEqual(res["caveats"], [])
+
+    def test_declaration_contradicting_netlist_is_reported_not_obeyed(self):
+        """人講的最大，但**矛盾要講出來**，不能默默照單全收。"""
+        pj = self._board({"GND": [("U1", "6")], "VDD_3V3": [("U1", "14")]},
+                         mpn="EXP_A")
+        res = self._resolve(pj, fixtures.two_package_variants(), declared="PKGA16")
+        self.assertEqual(res["status"], ndd_package.CONFLICT)
+        self.assertIn("package:conflict", res["caveats"])
+
+    def test_single_candidate_needs_no_evidence(self):
+        pj = self._board({"S1": [("U1", "2")], "GND": [("U1", "10")],
+                          "VDD_3V3": [("U1", "20")]}, mpn="BUF_A", fp="PKG24")
+        res = self._resolve(pj, {"B": fixtures.buffer_model()})
+        self.assertEqual(res["status"], ndd_package.SINGLE_CANDIDATE)
+        self.assertEqual(res["caveats"], [])
+
+    def test_unconnected_power_pin_is_a_contradiction(self):
+        """訊號腳可以 NC，**電源/接地腳不會**。宣告的 VSS/VDD 沒接就是腳位對不上。
+
+        這條規則是拓樸判別力的主要來源——即使只有一個候選模型也要擋。
         """
-        observed = [str(i) for i in range(1, 21)]     # 20 支已接腳
-        pkg, by, _c, _n = ndd_pinfn.resolve_package(self.LEGAL, observed)
-        self.assertNotEqual(pkg, "PKGB20")
-        self.assertEqual(by, ndd_pinfn.UNRESOLVED)
+        pj = self._board({"S1": [("U1", "2")]}, mpn="BUF_A", fp="PKG24")
+        res = self._resolve(pj, {"B": fixtures.buffer_model()})
+        self.assertEqual(res["status"], ndd_package.CONFLICT)
+        self.assertIn("未接", res["evidence"])
 
-    def test_observed_fits_only_one_column(self):
-        observed = ["24", "1"]                        # 只有 24 腳封裝容得下
-        pkg, by, corrob, _n = ndd_pinfn.resolve_package(self.LEGAL, observed)
-        self.assertEqual(pkg, "PKGA24")
-        self.assertEqual(by, ndd_pinfn.AUTO_UNIQUE)
-        self.assertEqual(corrob, "pin_set")
+    def test_pin_count_is_never_used_to_infer_package(self):
+        """netlist 只有已接腳，用腳數推封裝會穩定偏向較小的封裝。
 
-    def test_single_column_is_not_applicable(self):
-        pkg, by, _c, _n = ndd_pinfn.resolve_package({"ONLY24": {"1", "2"}}, ["1"])
-        self.assertEqual(by, ndd_pinfn.NOT_APPLICABLE)
-        self.assertEqual(pkg, "ONLY24")
-
-    def test_extraction_failure_must_not_fall_back_to_pin_count(self):
-        pkg, by, _c, note = ndd_pinfn.resolve_package(None, ["1", "2", "3"])
-        self.assertEqual(by, ndd_pinfn.UNRESOLVED)
-        self.assertEqual(pkg, "")
-        self.assertIn("腳數", note)
-
-    def test_declared_package_not_in_table_is_conflict(self):
-        _p, by, _c, _n = ndd_pinfn.resolve_package(self.LEGAL, ["1"], "PKGZ99")
-        self.assertEqual(by, ndd_pinfn.CONFLICT)
-
-    def test_shared_pinout_requires_matching_pin_functions(self):
-        """候選封裝在**實際用到的腳上功能一致** -> 封裝不改變答案，不必問。"""
-        legal = {"P1": {"1": "IN", "2": "OUT", "9": "NC"},
-                 "P2": {"1": "IN", "2": "OUT", "8": "NC"}}
-        _p, by, corrob, _n = ndd_pinfn.resolve_package(legal, ["1", "2"])
-        self.assertEqual(by, ndd_pinfn.SHARED_PINOUT)
-        self.assertEqual(corrob, "pin_function")
-
-    def test_same_labels_different_functions_is_not_shared(self):
-        """label 集合相同 != 腳位相同。這是最容易誤判成『不必問』的情況。"""
-        legal = {"P1": {"1": "IN", "2": "OUT"},
-                 "P2": {"1": "OUT", "2": "IN"}}
-        _p, by, _c, _n = ndd_pinfn.resolve_package(legal, ["1", "2"])
-        self.assertEqual(by, ndd_pinfn.UNRESOLVED)
+        這裡只接 2 支腳——若工具用腳數推論，會挑出某個小封裝；正確行為是
+        因為證據不足而要求使用者補充。
+        """
+        pj = self._board({"S1": [("U1", "1")], "S2": [("U1", "4")]},
+                         mpn="EXP_A", fp="GENERIC16")
+        res = self._resolve(pj, fixtures.two_package_variants())
+        self.assertEqual(res["status"], ndd_package.UNRESOLVED)
 
 
 class TestCacheMigration(unittest.TestCase):
@@ -266,10 +301,10 @@ class TestModelSchema(unittest.TestCase):
                                             "gate": {"all_of": ["5"]}}]}})
         self.assertIn("address", str(cm.exception))
 
-    def test_exact_table_requires_package(self):
+    def test_pin_roles_values_are_checked(self):
         with self.assertRaises(ModelError):
-            self._load({"X": {"match": ["X"], "package_basis": "exact_table",
-                              "verified_against": "a", "transfer": []}})
+            self._load({"X": {"match": ["X"], "verified_against": "a",
+                              "transfer": [], "pin_roles": {"8": "GROUND"}}})
 
     def test_polarity_only_on_enable_like(self):
         with self.assertRaises(ModelError):
@@ -354,15 +389,14 @@ class TestModelSelection(unittest.TestCase):
         self.assertIsNone(m)
         self.assertIn("model:ambiguous", cav)
 
-    def test_unresolved_package_blocks_transfer(self):
-        """package 未解析且 basis 是 exact_table -> 不得生成正式 transfer edge。"""
+    def test_conflicting_declared_package_blocks_transfer(self):
         models = {"A": fixtures.buffer_model()}
-        _n, edges, cav = transfer_for(models, "", "BUF_A", 20, None)
-        self.assertIn("package:unresolved", cav)
+        _n, edges, cav = transfer_for(models, "", "BUF_A", 20, "OTHER_PKG")
+        self.assertIn("package:conflict", cav)
         self.assertIsNone(edges)
 
-    def test_shared_pinout_model_needs_no_package(self):
-        models = {"A": fixtures.fanout_model()}     # package_basis=not_applicable
+    def test_model_usable_without_any_package_declaration(self):
+        models = {"A": fixtures.fanout_model()}
         _n, edges, cav = transfer_for(models, "", "FAN_A", 20, None)
         self.assertEqual(cav, [])
         self.assertTrue(edges)
@@ -406,18 +440,33 @@ class TestEndpoints(unittest.TestCase):
         kind, _r, _c = fab.endpoint_of(("a", "U2", "1"))
         self.assertEqual(kind, EP_UNKNOWN_DECLARED)
 
-    def test_model_with_unresolved_package_is_model_unusable(self):
-        """有 model 但無法使用 != 尚未分類。必須是獨立狀態並記錄原因。"""
-        fab = self._board(models={"B": fixtures.buffer_model()})
-        kind, reason, _c = fab.endpoint_of(("a", "U1", "2"))
+    def test_ambiguous_package_is_model_unusable_not_unclassified(self):
+        """有模型但封裝無法定案 != 尚未分類。必須是獨立狀態並記錄原因。"""
+        pj = fixtures.Project()
+        pj.board("a", {"U1": "GENERIC16", "J1": "CONN"},
+                 {"S1": [("J1", "1"), ("U1", "1")], "S2": [("U1", "4")]},
+                 [{"Part Reference": "U1", "Manufacturer_PN": "EXP_A"},
+                  {"Part Reference": "J1", "Manufacturer_PN": "CONN_A"}],
+                 bom_scope="complete")
+        fab = _fab(pj, fixtures.two_package_variants())
+        kind, reason, _c = fab.endpoint_of(("a", "U1", "1"))
         self.assertEqual(kind, EP_UNKNOWN_UNUSABLE)
         self.assertEqual(reason, "package_unresolved")
 
-    def test_resolved_package_allows_transfer(self):
-        fab = self._board(models={"B": fixtures.buffer_model()},
-                          part_package={"BUF_A": "PKG24"})
-        self.assertIsNone(fab.endpoint_of(("a", "U1", "2")),
-                          "package 鎖定後應可穿越")
+    def test_topology_evidence_makes_the_model_usable(self):
+        """加上電源/接地腳的接法之後，封裝可由 netlist 推定，模型就能用。"""
+        pj = fixtures.Project()
+        pj.board("a", {"U1": "TSSOP16_BODY", "J1": "CONN"},
+                 {"S1": [("J1", "1"), ("U1", "1")], "S2": [("U1", "4")],
+                  "GND": [("U1", "8")], "VDD_3V3": [("U1", "16")]},
+                 [{"Part Reference": "U1", "Manufacturer_PN": "EXP_APW"},
+                  {"Part Reference": "J1", "Manufacturer_PN": "CONN_A"}],
+                 bom_scope="complete")
+        fab = _fab(pj, fixtures.two_package_variants())
+        self.assertIsNone(fab.endpoint_of(("a", "U1", "1")),
+                          "封裝推定後應可穿越")
+        cav = fab.pkg_res[("a", "U1")]["caveats"]
+        self.assertIn("package:inferred", cav, "推論仍要標記")
 
 
 class TestHintGraphSeparation(unittest.TestCase):

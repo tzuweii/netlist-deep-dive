@@ -31,8 +31,9 @@ import re
 from collections import deque
 
 import ndd_confidence as C
+import ndd_package
 from ndd_models import (control_influences, derive_gating, missing_pins,
-                        outgoing, select_model, transfer_for)
+                        outgoing, transfer_edges)
 
 # endpoint 分類 —— 「沒有模型」**不等於**「訊號在此結束」。
 EP_TERMINAL = "terminal(declared)"
@@ -67,6 +68,8 @@ class Fabric(object):
         self.endpoints = endpoints or {}
         self.part_package = part_package or {}
         self.hints = []                 # hint graph：只輸出，不走
+        self.pkg_res = {}               # (board, refdes) -> 封裝判定與證據
+        self._model_cache = {}
         self._build_mates()
 
     # ---- 對接邊 -----------------------------------------------------------
@@ -289,20 +292,42 @@ class Fabric(object):
 
     # ---- 模型解析 ---------------------------------------------------------
     def _model_at(self, board, refdes):
-        """回傳 (name, model, edges, caveats)。caveats 含阻斷級時 edges 為 None。"""
-        nl = self.nl[board]
-        fp = nl.parts.get(refdes, "")
-        pn = self._pn(board, refdes)
-        pkg = self.package_of(board, refdes)
-        name, edges, cav = transfer_for(self.models, fp, pn,
-                                        len(nl.pins(refdes)), pkg)
-        _n, m, _c = select_model(self.models, fp, pn, pkg)
+        """回傳 (name, model, edges, caveats)。
+
+        封裝判定**只用 netlist 與 BOM**（`ndd_package.resolve`）：模型宣告的
+        電源／接地腳實際接在哪、訂購碼後綴、footprint 名稱。推論出來的會帶
+        `package:inferred`，可以用但要標 `[?]`；證據不足則不給 edges。
+        """
+        key = (board, refdes)
+        if key in self._model_cache:
+            return self._model_cache[key]
+        nl, bom = self.nl[board], self.bom[board]
+        declared = self.package_of(board, refdes)
+        res = ndd_package.resolve(self.models, nl, bom, board, refdes,
+                                  self.cls, declared)
+        self.pkg_res[key] = res
+        m = res["model"]
+        cav = list(res["caveats"])
+        edges = None
         if m is not None:
             miss = missing_pins(m, nl.pins(refdes).keys())
             if miss:
-                cav = list(cav) + ["model:pin_absent"]
-                edges = None
-        return name, m, edges, cav
+                cav.append("model:pin_absent")
+            elif not [c for c in cav if c in _BLOCKING]:
+                edges = transfer_edges(m)
+        out = (res["name"], m, edges, cav)
+        self._model_cache[key] = out
+        return out
+
+    def _passive_edges(self, board, rd):
+        """兩腳被動件確實雙向導通，且不需要 datasheet。"""
+        from ndd_models import TWO_PIN_FOOTPRINT_PREFIX
+        nl = self.nl[board]
+        fp = nl.parts.get(rd, "")
+        if fp.startswith(TWO_PIN_FOOTPRINT_PREFIX) and len(nl.pins(rd)) == 2:
+            return [("1", "2", "bidirectional", {}),
+                    ("2", "1", "bidirectional", {})]
+        return None
 
     def _rail_state(self, board, refdes, pin, polarity):
         """gate 的實體腳實際接到什麼 —— `always` 的唯一正面證據來源。"""
@@ -335,6 +360,8 @@ class Fabric(object):
                     out.append(((board, rd2, p2), "net:%s" % net, [], C.ALWAYS))
 
         name, m, edges, cav = self._model_at(board, rd)
+        if edges is None and m is None and not cav:
+            edges, name = self._passive_edges(board, rd), "2-pin passive"
         if edges:
             rail = lambda p, pol: self._rail_state(board, rd, p, pol)
             for nxt_pin, edge in outgoing(edges, pin):
@@ -366,6 +393,8 @@ class Fabric(object):
         if blocking:
             return (EP_UNKNOWN_UNUSABLE,
                     ",".join(_BLOCKING[c] for c in sorted(blocking)), list(cav))
+        if edges is None and m is None and not cav:
+            edges = self._passive_edges(board, rd)
         if edges and outgoing(edges, pin):
             return None
         declared = (self.endpoints.get("%s:%s" % (board, rd))

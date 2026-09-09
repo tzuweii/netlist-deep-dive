@@ -173,21 +173,42 @@ python ndd.py pinfn --list
 > 內部連通」這種推出來的結論。原文快取 5 秒就能核對；推論快取會把錯誤凍結成
 > 永久資產。datasheet 換版時 SHA-256 不符會自動失效重抽。
 
-### 封裝是惰性解析的
+### 封裝判定只用 netlist + BOM
 
-**絕大多數 IC 不需要你填封裝。** 只有同時滿足「你查了這顆」「datasheet 有多個
-腳位表欄」「各欄在你用到的腳上功能不同」時，工具才會要求指定：
+**工具不解析 datasheet 的腳位表。** 每家排版都不同，通用地「看懂」是無底洞，
+而且一列錯位整張表就作廢。改用三個證據來源排名（同 `mate` 的機制）：
+
+| 來源 | 標記 |
+|---|---|
+| **模型宣告的電源/接地腳，實際接在哪** | `[N]` |
+| 訂購碼的封裝後綴（`…PW` / `…BS`） | `[B]` |
+| layout 的 footprint 名稱 | `[N]` |
+
+`ndd.py audit` 的 [1.5] 段會逐顆列出判定與證據：
 
 ```
-!! package 未解析（unresolved_pending_user）——拒絕寫入快取
-   請用 --package <欄標題> 指定；可選的欄：PKGA24／PKGB24
+[?]  a.U1 (EXP_APW) [?] 推論 PKGA16（margin 4）：
+     拓樸[N] 16:PWR✓ 8:GND✓；料號後綴[B] ✓；footprint[N] ✓
+待辦 a.U3 (EXP_A)  [?] 待補：候選 PKGA16／PKGB16；證據不足
 ```
 
-此時把答案填進 `ndd.json` 的 `part_package`（可用料號當預設，
-`<board>:<refdes>` 覆寫個別元件）。實務上一個專案落在個位數。
+**推論出來的一律標 `[?]`**，並帶 `package:inferred` caveat 沿路徑傳到 CSV。
+門檻是「零矛盾 + 唯一勝出 + 至少一個獨立來源佐證」，達不到就列入待補，
+**不替你假設**。要定案就填 `ndd.json` 的 `part_package`。
 
-⚠️ **不要用腳數猜封裝。** netlist 只有已接腳，用腳數判定會穩定偏向較小的封裝。
-工具不會這樣做，你回答時也不要。
+⚠️ 即使你明確宣告，若與 netlist 矛盾仍會 FAIL——**人講的最大，但矛盾要講出來**。
+
+### pinfn 抽到多筆時不替你挑
+
+```
+!! pin 14 抽到 2 筆（這份 datasheet 可能涵蓋多種封裝）。拒絕替你挑，也不寫快取。
+   [1] p.4  SCL   腳號欄位 14,12   serial clock line
+   [2] p.4  VDD   腳號欄位 16,14   supply voltage
+   -> --pick <n> [--package <標籤>]
+```
+
+腳號欄位直接攤在眼前，你 5 秒就能對照 audit 的封裝判定選定。**抽到一筆才是
+已證明無歧義**，才會自動寫入快取。
 
 ### 元件模型（選用，非前提）
 
@@ -195,6 +216,7 @@ python ndd.py pinfn --list
 `references/models.md`。要點：
 
 - `direction` 必須顯式（`forward` / `bidirectional`），沒有預設值
+- `pin_roles` 記下 VSS/VDD 是哪幾支腳（成本趨近於零，卻是封裝判定的主要證據）
 - `gate`（通不通）與 `parameter_control`（通過後的性質）要分開
 - `always` 由 netlist 推導，不可手寫
 - **本 skill 不內建 seed model** —— 預先建模是把你的解讀凍結成永久資產
@@ -265,7 +287,8 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 - **不要憑記憶寫腳位。** 一律 `pinfn` 查原文並標頁碼。
 - **不要把控制關係當成訊號路徑。** latch/reset/select 進 hint，不進 trace。
 - **不要讓單向元件雙向走。** `direction` 必須來自 datasheet。
-- **不要用腳數推封裝。** netlist 只有已接腳。
+- **不要用腳數推封裝。** netlist 只有已接腳。封裝由電源腳接法等證據排名判定。
+- **推論出來的封裝一律標 `[?]`。** 它不是查證過的事實。
 - **不要說「未貼件」除非 `bom_scope: complete`。**
 - **不要把 `mate:unapproved` 的路徑講成已確認對接。**
 - **不要預先大量建模。** 要預先投資就投資在補 datasheet。

@@ -1,24 +1,21 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""從本地 datasheet PDF 抽出腳位原文，並做**惰性** package 解析。
+"""從本地 datasheet PDF 抽出**某支腳的原文**，並快取原文與出處。
 
 ════════════════════════════════════════════════════════════════════════════
-設計上最重要的兩條：
+**快取原文，永不快取解讀。**
+  快取 datasheet 的逐字內容 + 出處（檔名／頁碼／SHA-256）。不是「pin1 與
+  pin3 內部連通」這種推出來的結論。原文快取 5 秒就能核對；推論快取會把錯誤
+  凍結成永久資產，而且沒人看得出來。
 
-**一、快取原文，永不快取解讀。**
-  快取 datasheet 的逐字內容 + 出處（檔名／頁碼／SHA-256／封裝欄）。
-  不是「pin1 與 pin3 內部連通」這種推出來的拓樸結論。原文快取 5 秒就能核對；
-  推論快取會把錯誤凍結成永久資產，而且沒人看得出來。
+**本模組不做封裝判定。**
+  每家 datasheet 的腳位表排版都不同（腳註標記、跨行儲存格、文字層把兩個腳號
+  併成一個），要通用地「看懂」表格是無底洞，而且一列錯位就讓整張表作廢。
+  封裝改由 `ndd_package` 依 **netlist + BOM** 的證據判定。
 
-**二、package 只在會改變答案時才解析。**
-  三階，前兩階零成本：
-    1. datasheet 腳位表只有一欄        -> not_applicable（**已證明**無歧義）
-    2. 觀測腳位集 ⊆ 某欄合法集且唯一   -> auto_unique
-    3. 多欄皆可容納／抽取失敗          -> unresolved_pending_user（問一次）
-
-  ⚠️ **不得以已接腳數推定封裝。** netlist 的 pinmap 只含已接腳，系統性低估，
-     用腳數判定會穩定偏向較小的封裝——錯的方向一致，用滿接樣本測永遠看不到。
-     腳數只能「排除」候選，不能「證明」。
+  這裡只做兩件事：
+    抽到一筆 -> 直接給答案（**已證明**無歧義），寫進快取
+    抽到多筆 -> 攤開全部原文與頁碼，**拒絕替使用者挑**，標 [?] 等指定
 ════════════════════════════════════════════════════════════════════════════
 """
 import csv
@@ -35,15 +32,12 @@ COLS = ["part", "pin", "pin_name", "direction", "text",
 LEGACY_COLS = ["part", "pin", "pin_name", "direction", "text",
                "source_file", "page", "sha256", "verified_on"]
 
-# resolved_by 的合法值（有優先序）
-NOT_APPLICABLE = "not_applicable"
-SHARED_PINOUT = "shared_pinout"
-AUTO_UNIQUE = "auto_unique"
-USER_CONFIRMED = "user_confirmed"
-DECLARED_UNVERIFIED = "declared_unverified"
-UNRESOLVED = "unresolved_pending_user"
-CONFLICT = "conflict"
-RESOLVED_OK = (NOT_APPLICABLE, SHARED_PINOUT, AUTO_UNIQUE, USER_CONFIRMED)
+# resolved_by 的合法值。**沒有「自動推導封裝」這種狀態** —— 封裝由
+# `ndd_package` 依 netlist/BOM 證據判定，這裡只記錄這一筆原文是怎麼定案的。
+NOT_APPLICABLE = "not_applicable"        # 只抽到一筆，**已證明**無歧義
+USER_CONFIRMED = "user_confirmed"        # 多筆，使用者用 --pick 指定
+UNRESOLVED = "unresolved_pending_user"   # 多筆且未指定 -> [?]，拒絕寫快取
+RESOLVED_OK = (NOT_APPLICABLE, USER_CONFIRMED)
 
 # ⚠️ 腳位表至少有三種排版，只認一種會**靜靜漏掉正確的列**——那比抽不到更危險。
 PIN_FIRST_RX = re.compile(
@@ -59,8 +53,8 @@ DIR_RX = re.compile(r"^(I/O|I|O|P|Input|Output|Supply|Ground|Power|GND|In|Out)\b
                     re.I)
 NOISE_RX = re.compile(r"\.{4,}|Submit Document|Copyright|www\.|Product Folder"
                       r"|^\s*\d+\s*$|Feedback")
-# 封裝欄標題：字母開頭、含結尾腳數，例如 HVQFN24 / SO24 / TSSOP20 / PKG24
-PKG_TOKEN_RX = re.compile(r"\b([A-Z][A-Z0-9\-]*?(\d{1,3}))\b")
+# 腳註標記：`P1[1] 5 3 Port ...` —— 抽逐腳原文時先剝掉，否則整列比不到。
+FOOTNOTE_RX = re.compile(r"\[\d+\]")
 
 
 def sha256(path):
@@ -164,101 +158,6 @@ def _pages(path, max_pages):
         yield i, (page.extract_text() or "")
 
 
-# ------------------------------------------------- 逐 package 欄合法集 --
-def extract_pin_tables(path, max_pages=20):
-    """回傳 (legal, reason)。
-
-    `legal` 是 `{封裝欄標題: set(pin label)}`；抽不到可信的多欄表時回傳
-    `(None, 原因)`。
-
-    ⚠️ **必須全部成立才算成功**，任一不成立即視為抽取失敗：
-        ① 找得到明確的封裝欄標題列
-        ② 每個資料列的 pin 欄位數與標題欄數**相等**（不是「至少」）
-        ③ 同一欄內無重複 pin
-        ④ 欄內腳位數與封裝名稱隱含腳數相符
-
-    PDF 文字抽取會失去欄位幾何，這是最容易產生「看似合法但錯位」候選的地方。
-    失敗時**絕不可**退回腳數猜測——那會把整個修正抵銷掉。
-    """
-    for _pg, text in _pages(path, max_pages):
-        lines = [l for l in text.splitlines() if l.strip()]
-        for i, line in enumerate(lines):
-            if NOISE_RX.search(line):
-                continue
-            toks = PKG_TOKEN_RX.findall(line.upper())
-            heads = [t[0] for t in toks]
-            counts = [int(t[1]) for t in toks]
-            if len(heads) < 2 or len(set(heads)) != len(heads):
-                continue
-            cols = {h: {} for h in heads}
-            ok_rows = 0
-            for row in lines[i + 1:i + 200]:
-                if NOISE_RX.search(row):
-                    continue
-                m = NAME_FIRST_RX.match(row)
-                if not m:
-                    continue
-                pins = [p for p in re.split(r"[\s,]+", m.group("pins")) if p]
-                if len(pins) != len(heads):      # ② 欄數必須相等
-                    continue
-                fn = m.group("name").split(",")[0].strip()
-                for h, p in zip(heads, pins):
-                    if p in cols[h]:
-                        return None, "欄 %s 內有重複 pin（欄位錯位）" % h
-                    cols[h][p] = fn              # ⚠️ 同時記下**腳位功能**
-                ok_rows += 1
-            if ok_rows < 3:
-                continue
-            for h, cnt in zip(heads, counts):
-                if len(cols[h]) != cnt:
-                    return None, ("欄 %s 抽出 %d 個 pin，但封裝名隱含 %d 個"
-                                  "（欄位錯位）" % (h, len(cols[h]), cnt))
-            return cols, ""
-    return None, "找不到可信的多封裝欄腳位表"
-
-
-def resolve_package(legal, observed, declared=None):
-    """三階解析。回傳 (package, resolved_by, corroborated_by, note)。
-
-    `legal` 是 `{封裝欄: {pin: 腳位功能}}`。
-
-    ⚠️ **shared_pinout 必須比對腳位功能，不能只比 pin label 集合。** 兩個封裝
-       同為 1–N 是常態，label 集合相同完全不代表 pin 5 是同一個訊號——那正是
-       package 解析要解決的問題本身。只比 label 等於把問題當成答案。
-    """
-    if declared:
-        if legal:
-            cand = [h for h in legal
-                    if h.upper() in declared.upper()
-                    or declared.upper() in h.upper()]
-            if not cand:
-                return (declared, CONFLICT, "",
-                        "指定的 %s 不在腳位表的封裝欄中" % declared)
-            miss = set(observed) - set(legal[cand[0]])
-            if miss:
-                return (cand[0], CONFLICT, "",
-                        "觀測腳位 %s 不存在於 %s 的合法集"
-                        % (",".join(sorted(miss)[:5]), cand[0]))
-            return cand[0], USER_CONFIRMED, "pin_set", ""
-        return declared, DECLARED_UNVERIFIED, "", "無法由腳位表佐證"
-    if legal is None:
-        return "", UNRESOLVED, "", "腳位表抽取失敗，不得退回腳數猜測"
-    if len(legal) == 1:
-        return list(legal)[0], NOT_APPLICABLE, "", ""
-    obs = set(str(p) for p in observed)
-    # ⚠️ 用**包含關係**而非基數：只能觀測到已接腳，所以方向必須是 observed ⊆ legal
-    fits = [h for h in legal if obs and obs <= set(legal[h])]
-    if len(fits) == 1:
-        return fits[0], AUTO_UNIQUE, "pin_set", ""
-    if not fits:
-        return "", CONFLICT, "", "觀測腳位不被任何封裝欄容納"
-    # 候選封裝在「實際用到的腳」上**功能完全一致** -> 封裝不改變答案，不必問
-    base = {p: legal[fits[0]][p] for p in obs}
-    if all(base == {p: legal[h][p] for p in obs} for h in fits[1:]):
-        return "", SHARED_PINOUT, "pin_function", "候選封裝在使用到的腳上功能一致"
-    return "", UNRESOLVED, "", "多個封裝欄皆可容納：%s" % "／".join(sorted(fits))
-
-
 # ------------------------------------------------------------ 逐腳原文 --
 def extract(path, pin, max_pages=20):
     """回傳 [(page, pin_name, direction, text, kind, pins), ...]。"""
@@ -268,9 +167,10 @@ def extract(path, pin, max_pages=20):
     for i, text in _pages(path, max_pages):
         if not text.strip():
             continue
-        for line in text.splitlines():
-            if NOISE_RX.search(line):
+        for raw in text.splitlines():
+            if NOISE_RX.search(raw):
                 continue
+            line = FOOTNOTE_RX.sub(" ", raw)   # `P1[1] 5 3 ...` 不剝就整列比不到
             for rx, kind in ((PIN_FIRST_RX, "A"), (NAME_FIRST_RX, "B/C")):
                 m = rx.match(line)
                 if not m:
@@ -331,12 +231,17 @@ def append_cache(project_dir, row):
         w.writerow({c: row.get(c, "") for c in COLS})
 
 
-def lookup(project_dir, ddir, part, pin, explicit=None, observed=None,
-           declared_package=None, verbose=True):
-    """先查快取（含 SHA 有效性），未命中才抽取。回傳 list[dict]。"""
+def lookup(project_dir, ddir, part, pin, explicit=None, package="",
+           pick=None, verbose=True):
+    """先查快取（含 SHA 有效性），未命中才抽取。回傳 list[dict]。
+
+    抽到多筆代表這份 datasheet 涵蓋多種封裝／多處提到這支腳。**工具不替你挑**
+    ——列出全部原文與頁碼，用 `--pick <n>` 指定，並在 `--package` 記下你的判斷
+    依據。在指定之前不寫快取，避免把未解決的歧義保存成資產。
+    """
     _p, rows, migrated = load_cache(project_dir)
     if migrated and verbose:
-        print("!! 快取有 %d 列是舊 schema，已一律視為 %s（需重新解析封裝）"
+        print("!! 快取有 %d 列是舊 schema，已一律視為 %s（需重新確認）"
               % (migrated, UNRESOLVED))
     cached = [r for r in rows
               if r["part"].upper() == part.upper() and r["pin"] == str(pin)
@@ -345,7 +250,6 @@ def lookup(project_dir, ddir, part, pin, explicit=None, observed=None,
 
     if cached and ds and os.path.exists(ds):
         cur = sha256(ds)
-        # 前綴 SHA 與完整 SHA 不可直接比對；長度不同即視為待重抽
         stale = [r for r in cached
                  if r["sha256"] and (len(r["sha256"]) != len(cur)
                                      or r["sha256"] != cur)]
@@ -372,44 +276,41 @@ def lookup(project_dir, ddir, part, pin, explicit=None, observed=None,
                   "一律標記 [D 缺]，不得以推論代替。**")
         return []
 
-    legal, why = extract_pin_tables(ds)
-    pkg, resolved_by, corrob, note = resolve_package(
-        legal, observed or [], declared_package)
-    if verbose and legal is None and why:
-        print("   （腳位表逐欄抽取失敗：%s）" % why)
-    if verbose and note:
-        print("   （package: %s）" % note)
-
     hits = extract(ds, pin)
     if not hits:
         if verbose:
             print("!! %s 裡抽不到 pin %s 的腳位列（可能是掃描影像，或表格格式特殊）"
                   % (os.path.basename(ds), pin))
-        return []
-
-    if resolved_by not in RESOLVED_OK:
-        if verbose:
-            print("!! package 未解析（%s）——**拒絕寫入快取**，避免把未解決的"
-                  "歧義保存成資產。" % resolved_by)
-            print("   請用 --package <欄標題> 指定；可選的欄：%s"
-                  % ("／".join(sorted(legal)) if legal else "（抽取失敗）"))
-            for page, name, direction, text, _k, _p in hits:
-                print("   [未快取] p.%s  %s  %s  %s" % (page, name, direction, text))
+            print("   請人工開啟該 PDF 確認 —— 這種情況**不要猜**。")
         return []
 
     sha = sha256(ds)
+    src = os.path.basename(ds)
+
+    if len(hits) > 1 and pick is None:
+        if verbose:
+            print("!! pin %s 抽到 %d 筆（這份 datasheet 可能涵蓋多種封裝）。"
+                  "**拒絕替你挑，也不寫快取。**" % (pin, len(hits)))
+            for i, (pg, name, d, txt, _k, pins) in enumerate(hits, start=1):
+                print("   [%d] p.%-3s %-10s %-6s 腳號欄位 %-10s %s"
+                      % (i, pg, name, d, ",".join(pins), txt[:60]))
+            print("   -> 確認你的封裝後：--pick <n> [--package <你的封裝標籤>]")
+            print("   -> 封裝可由 `ndd.py audit` 的封裝判定段推斷（只用 "
+                  "netlist/BOM），推論結果一律標 [?]，請自行複核。")
+        return []
+
+    chosen = hits if len(hits) == 1 else [hits[pick - 1]]
+    resolved = NOT_APPLICABLE if len(hits) == 1 else USER_CONFIRMED
     out = []
-    for page, name, direction, text, _kind, _pins in hits:
+    for page, name, direction, text, _kind, _pins in chosen:
         row = {"part": part, "pin": str(pin), "pin_name": name,
                "direction": direction, "text": text,
-               "source_file": os.path.basename(ds), "page": str(page),
-               "sha256": sha, "package": pkg, "resolved_by": resolved_by,
-               "corroborated_by": corrob,
-               "verified_on": time.strftime("%Y-%m-%d")}
+               "source_file": src, "page": str(page), "sha256": sha,
+               "package": package or "", "resolved_by": resolved,
+               "corroborated_by": "", "verified_on": time.strftime("%Y-%m-%d")}
         append_cache(project_dir, row)
         out.append(row)
         if verbose:
-            print("%s p.%s:  %s  %s  %s  %s  [package %s / %s]"
-                  % (os.path.basename(ds), page, pin, name, direction, text,
-                     pkg or "-", resolved_by))
+            print("%s p.%s:  %s  %s  %s  %s  [%s]"
+                  % (src, page, pin, name, direction, text, resolved))
     return out

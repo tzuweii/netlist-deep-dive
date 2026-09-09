@@ -29,7 +29,10 @@ import ndd_confidence as C
 
 # --- 合法值 -----------------------------------------------------------------
 DIRECTIONS = ("forward", "bidirectional")
-PACKAGE_BASIS = ("exact_table", "not_applicable", "shared_pinout")
+PIN_ROLES = ("GND", "PWR", "SIG")
+# ⚠️ `pin_roles` 是這次改版的關鍵欄位：建模的人在 datasheet 上看到 VSS/VDD 是
+#    哪幾支腳時順手記下來（成本趨近於零），工具就能**只用 netlist** 驗證
+#    「這個封裝的腳位對不對得上這塊板」——不需要解析 datasheet 表格。
 CONTROL_TYPES = ("enable", "reset", "address", "select", "mode",
                  "power", "clock", "trigger", "other")
 MECHANISMS = ("strap", "runtime", "external", "unknown")
@@ -41,6 +44,10 @@ TWO_PIN_FOOTPRINT_PREFIX = ("R_", "L_", "FB_", "Ferrite", "RES", "IND")
 
 class ModelError(Exception):
     pass
+
+
+def models_with_same_match(_m):
+    return ()
 
 
 # --------------------------------------------------------------- 載入驗證 --
@@ -57,13 +64,16 @@ def _validate(name, m):
               '\n  "transfer": [{"from": ["1"], "to": ["3"], '
               '"direction": "forward"}]')
 
-    basis = m.get("package_basis")
-    if basis not in PACKAGE_BASIS:
-        _fail(name, "`package_basis` 必須是 %s 之一（目前 %r）"
-                    % ("／".join(PACKAGE_BASIS), basis))
-    if basis == "exact_table" and not m.get("package"):
-        _fail(name, "`package_basis: exact_table` 必須同時給 `package`，"
-                    "且值要是 datasheet 腳位表的**實際欄位標題**")
+    # 封裝判定改由 netlist/BOM 證據排名（ndd_package），不再解析 datasheet 表格。
+    # `package` 是人填的標籤，工具不去「驗證它對不對」，只驗它與 netlist 一致。
+    roles = m.get("pin_roles") or {}
+    for pin, role in roles.items():
+        if role not in PIN_ROLES:
+            _fail(name, "pin_roles['%s'] 必須是 %s 之一（目前 %r）"
+                        % (pin, "／".join(PIN_ROLES), role))
+    if len(models_with_same_match(m)) and not roles and not m.get("ordering_suffix") \
+            and not m.get("footprint_match"):
+        pass    # 單一候選時不需要證據；多候選時由 ndd_package 判定並要求補充
 
     edges = m.get("transfer") or []
     if not m.get("verified_against") and not all(
@@ -183,18 +193,17 @@ def select_model(models, footprint, pn="", package=None):
 
 
 def _package_filter(name, m, package):
-    """package 已解析時，只接受相容的 model；未解析時依 basis 決定可否使用。"""
-    basis = m.get("package_basis")
-    if basis in ("not_applicable", "shared_pinout"):
-        return name, m, []                      # 封裝不改變涉及的腳位
+    """保留給舊呼叫點；封裝判定已移到 `ndd_package.resolve()`。
+
+    這裡只做一件事：若呼叫端明確給了 package 而模型自報的 package 對不上，
+    就拒絕——避免把 A 封裝的腳位套到 B 封裝上。
+    """
     want = (m.get("package") or "").upper()
-    if package:
+    if package and want:
         got = str(package).upper()
-        # 欄標題會隨改版變動（PKG24 -> PKG24 (SOT616-1)），用子字串比對
-        if want and (want in got or got in want):
-            return name, m, []
-        return None, None, ["package:conflict"]
-    return name, m, ["package:unresolved"]
+        if want not in got and got not in want:
+            return None, None, ["package:conflict"]
+    return name, m, []
 
 
 # ------------------------------------------------------------- transfer --

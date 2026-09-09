@@ -158,45 +158,53 @@
 
 ---
 
-## 6. Commit 3 — 惰性 package 解析與 pinfn
+## 6. Commit 3 — 封裝判定（只用 netlist + BOM）與 pinfn
 
-### 5.1 何時需要 package
+### 6.1 為什麼不從 datasheet 表格推
 
-只在下列情況解析 package：
+每家 datasheet 的腳位表排版都不同。實測一份 NXP 16 腳的表同時踩到三種文字層
+問題：腳註標記讓整列比不到、符號與資料被拆成兩行、**兩個腳號被併成一個**
+（`VSS 86` 其實是 pin 8 與 pin 6）。
 
-- 建立或套用 signal-transfer model，且 datasheet 的 package 會改變該 model 使用
-  的 pin label／pin function；
-- 使用 `pinfn`，且目標 datasheet 有多個 pin-table 欄且結果會隨 package 改變；
-- 需依實體 control pin 推導 enable／reset 等條件。
+要通用地「看懂」表格是無底洞，而且**一列錯位就讓整張表作廢**——用一張已知有
+錯位的表去產生腳位對應，比不做更危險。
 
-其餘 IC 不問 package。單一 pin table，或全部候選 package 在**實際使用的 pin**
-上完全一致時，視為 `not_applicable`／`shared_pinout`，不得向使用者索取資料。
+### 6.2 改用證據排名（沿用 `mate` 的機制）
 
-### 5.2 pin-table 抽取與 package 判定
+- [ ] 三個獨立來源：模型宣告的電源/接地腳實際接法 `[N]`、訂購碼後綴 `[B]`、
+  footprint 名稱 `[N]`。
+- [ ] 判別力最強的是第一項；**宣告的 GND/PWR 腳在 netlist 上完全沒接 = 矛盾**
+  （訊號腳可以 NC，電源腳不會）。
+- [ ] `inferred` 門檻：零矛盾 + 唯一勝出（margin ≥ 2）+ 至少一個獨立來源佐證。
+- [ ] **推論結果一律標 `[?]`** 並帶 `package:inferred` caveat 沿路徑傳到 CSV。
+- [ ] 使用者明確宣告優先，但**與 netlist 矛盾時仍報 `conflict`**——人講的最大，
+  矛盾要講出來。
+- [ ] 證據不足 → `unresolved_pending_user`，列入待補，**不替使用者假設**。
+- [ ] **不得以已接腳數推定封裝**（netlist 只有已接腳，會穩定偏向較小的封裝）。
 
-- [ ] `ndd_pinfn.extract()` 升級為逐 package 欄彙整合法 pin-label 集。
-- [ ] 只有同時滿足「明確欄標題、每列欄數相等、欄內 pin 不重複、欄內腳數與
-  package 名隱含腳數相符」才接受自動抽取。
-- [ ] 觀測 pin 集是某一欄合法集的唯一子集才可 `auto_unique`。
-- [ ] 多欄皆可容納、抽取失敗或衝突時，標 `unresolved_pending_user`；不得以
-  腳數較接近為正面證據，不得寫入未解決的 pinfn 快取列。
-- [ ] 快取加入 `package`、`resolved_by`、`corroborated_by`、完整 datasheet SHA-256。
+### 6.3 模型的證據欄位
 
-### 5.3 使用介面與例外表
+- [ ] `pin_roles`（`{pin: GND|PWR|SIG}`）—— 建模時順手記下 VSS/VDD，成本趨近
+  於零，卻是封裝判定的主要證據。
+- [ ] `ordering_suffix`、`footprint_match` —— 選填的佐證來源。
+- [ ] `match` 填基礎料號即可；比對允許**訂購碼後綴**（`PCA9554B` 對得上
+  `PCA9554BPW`），但多出的部分必須以字母開頭，避免 `LM358` 誤中 `LM3584`。
 
-- [ ] 新增 `pinfn --board <key> --refdes <refdes> <pin>`；由工具取得 netlist、BOM、
-  footprint 與 package 解析狀態。
-- [ ] `ndd.json.part_package` 支援 MPN 預設值與少量 board/refdes override。
-- [ ] `part_package` 是隨用隨長的例外表，不能成為 init 後必填清單。
+### 6.4 pinfn 只攤原文，不做封裝判定
+
+- [ ] 抽到**一筆** → `not_applicable`（**已證明**無歧義），寫入快取。
+- [ ] 抽到**多筆** → 列出全部原文、頁碼與腳號欄位，**拒絕替使用者挑，也不寫
+  快取**；用 `--pick <n>` 指定。
+- [ ] 抽不到 → 明說「請人工開 PDF」，**不猜**。
+- [ ] 快取加入 `package`、`resolved_by`、完整 datasheet SHA-256。
 
 **驗收：**
 
-- 只接部分腳的較大封裝，不得被誤選為小封裝；
-- 兩個 package 都容納觀測 pin 時，必須待使用者指定；
-- 抽取失敗時不得退回腳數猜測；
-- 單一 pin table 與 shared pinout 時不得要求 package。
-
----
+- 同料號兩封裝、電源腳位置不同 → 由 netlist 正確判定，且標 `[?]`；
+- 無證據時必須待補，不得挑第一個；
+- 宣告與 netlist 矛盾必須報 `conflict`；
+- 宣告的電源腳未接必須算矛盾；
+- 腳數在任何情況下都不得作為封裝的正面證據。
 
 ## 7. Commit 4 — 通用的 transfer、control 與 topology 資料模型
 
