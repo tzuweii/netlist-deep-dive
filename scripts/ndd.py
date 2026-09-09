@@ -89,10 +89,8 @@ class Project(object):
             b = self.cfg["boards"][key]
             if "bom_kind" in b and "bom_scope" not in b:
                 raise SystemExit(
-                    "board '%s' 仍使用已改名的 `bom_kind`。請改為 `bom_scope`，"
-                    "對應：SMT BOM -> smt_only、完整 BOM -> complete、"
-                    "未標註 -> unknown。**不得預設 complete**——那會把未知範圍"
-                    "的缺件誤報成真 DNI。" % key)
+                    "board '%s' 仍使用已改名的 `bom_kind`。請改為 `bom_scope`："
+                    "SMT BOM -> smt_only，其餘一律 complete。" % key)
             nl = Netlist(os.path.join(self.dir, b["asc"]))
             bom = Bom(os.path.join(self.dir, b["bom"]), sheet=b.get("sheet"),
                       ref_col=b.get("ref_col"),
@@ -165,7 +163,7 @@ def cmd_init(args):
         if conf != "OK":
             low_conf.append(key)
         boards[key] = {"label": os.path.splitext(a)[0], "asc": a, "bom": best,
-                       "bom_scope": "unknown", "sheet": None, "ref_col": None,
+                       "bom_scope": "complete", "sheet": None, "ref_col": None,
                        "expand_ranges": False}
         print("  %-14s parts %5d / signals %5d" % (key, len(nl.parts), len(nl.nets)))
         print("       -> BOM %-58s refdes 命中率 %.0f%% (次佳 %.0f%%)  %s"
@@ -195,8 +193,9 @@ def cmd_init(args):
         print("\n⚠️ 這幾塊板的 BOM 配對信心不足，**請人工確認 ndd.json 的 bom 欄**：%s"
               % ", ".join(low_conf))
     print("接著要人工補：")
-    print("  boards[*].bom_scope  complete / smt_only / variant / unknown")
-    print("                       **只有 complete 才能把缺件稱為 DNI**")
+    print("  boards[*].bom_scope  complete（預設）/ smt_only")
+    print("                       BOM 即權威，缺席即未貼件；SMT BOM 另需注意")
+    print("                       連接器/測試點/手插件不在其涵蓋範圍")
     print("  mates / mate_map     對接關係；mate_map 是已批准的腳位對映，")
     print("                       未批准時 trace 仍可跑，但每列會帶 mate:unapproved")
     print("  part_package         只在 datasheet 多封裝欄且會改變答案時才需要")
@@ -300,8 +299,10 @@ def cmd_export(args, pj):
                 elif d:
                     stuffed = "Y"
                 else:
-                    # ⚠️ 「BOM 沒有」不等於「板上沒有」——要看 BOM 範圍
-                    stuffed = "N" if bom.scope_supports_dni() else "UNKNOWN"
+                    # BOM 是權威 -> 缺席即未貼件。唯一例外是 SMT BOM 不涵蓋
+                    # 連接器/測試點/手插件那一類。
+                    from ndd_audit import dni_provable
+                    stuffed = "N" if dni_provable(nl, bom, rd)[0] else "UNKNOWN"
                 pn = bom.pn(rd)
                 val = bom.value(rd)
                 cls = ("passive" if nl.is_passive(rd)

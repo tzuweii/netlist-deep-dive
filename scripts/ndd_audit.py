@@ -33,24 +33,22 @@ def _expand_pins(spec):
     return [str(spec)]
 
 
-def dni_provable(nl, bom, refdes):
-    """這塊板的 BOM 範圍，能不能證明這顆 refdes「沒貼」？
+def is_connector(nl, refdes):
+    fp = (nl.parts.get(refdes) or "").lower()
+    return fp.startswith("conn") or bool(re.match(r"^J\d", refdes))
 
-    ⚠️ 「只有 complete 才能說 DNI」這條規則**太粗**。實測真實專案：一顆 SMT
-       電晶體缺席於 SMT BOM，那個缺席**是有意義的**——SMT BOM 本來就該列出
-       所有 SMT 件。不能證明的只有「本來就不在這份 BOM 範圍內」的東西：
-       機構件、測試點、連接器、手插件。
+
+def dni_provable(nl, bom, refdes):
+    """這份 BOM 能不能證明這顆 refdes「沒貼」？
+
+    **預設可以** —— 使用者給的 BOM 就是這塊板的權威，缺席即未貼件。
+
+    ⚠️ 唯一的例外是文件涵蓋範圍（不是正確性）：SMT BOM 依定義不列連接器、
+       測試點、鎖孔、手插件，它們的缺席不代表沒貼。
     """
-    if bom.scope == "complete":
+    if bom.covers_class(nl.is_mech(refdes), is_connector(nl, refdes)):
         return True, ""
-    if bom.scope != "smt_only":
-        return False, "scope=%s，該 BOM 只涵蓋部分佈件" % bom.scope
-    if nl.is_mech(refdes):
-        return False, "機構/測試點不在 SMT BOM 範圍內"
-    fp = (nl.parts.get(refdes) or "")
-    if fp.lower().startswith("conn") or re.match(r"^J\d", refdes):
-        return False, "連接器/手插件不在 SMT BOM 範圍內"
-    return True, ""
+    return False, "非 SMT 件不在 SMT BOM 的涵蓋範圍內"
 
 
 def run_assertion(a, nl, bom, models):
@@ -292,10 +290,10 @@ def run_audit(cfg, boards, models):
         print("       netlist 有 / BOM 無: active %d, passive %d, 機構 %d, 其他 %d"
               % (len(act), len(pas), len(mech), len(other)))
         if act:
-            print("         -> active %s: %s"
-                  % (bom.absent_label(), ", ".join(act[:30])))
-            if not bom.scope_supports_dni():
-                print("            （scope=%s，**不得稱為真 DNI**）" % bom.scope)
+            print("         -> active 未貼件 (DNI): %s" % ", ".join(act[:30]))
+            if bom.scope == "smt_only":
+                print("            （SMT BOM：連接器/測試點/手插件不在涵蓋範圍，"
+                      "已分開列於下方）")
         if other:
             print("         -> 未分類，請人工判斷: %s" % ", ".join(other[:30]))
         if mech:

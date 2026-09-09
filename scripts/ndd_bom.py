@@ -7,12 +7,17 @@
 ⚠️ **標題列位置各檔不同**，所以用「哪一列含有 refdes 欄名」自動偵測，
    **絕不寫死列號或欄號**。
 
-⚠️ **BOM 範圍決定能不能說「未貼件」**。舊版把「netlist 有、BOM 無」一律當成
-   DNI，但那只對「完整且會列出 DNP 列」的 BOM 成立。拿到 SMT BOM 或某個變體
-   時，缺件只代表**不在這份 BOM 的範圍內**。用 `scope` 區分：
+**使用者給的 BOM 就是這塊板的權威**——`netlist 有、BOM 無` 即未貼件 (DNI)。
+工具不做變體推理，也不去質疑 BOM 的正確性。
 
-     complete  —— 才可標為候選 DNI
-     smt_only / variant / unknown —— 只能標 `bom-absent:<scope>`
+⚠️ 唯一的例外是**文件涵蓋範圍**（不是正確性）：SMT BOM 依定義只列 SMT 件，
+   連接器、測試點、鎖孔、手插件本來就不在裡面，它們的缺席不代表沒貼。
+   用 `scope` 標註：
+
+     complete  —— 涵蓋全部佈件（**預設**）
+     smt_only  —— 只涵蓋 SMT 件；SMT 件缺席仍是 DNI，非 SMT 件缺席則不可判定
+
+   `variant` / `unknown` 保留為 BOM 身分的註記，判讀上等同 `complete`。
 
 ⚠️ **重複 refdes 不得靜默覆蓋**。舊版後列直接蓋掉前列，而 DNI 對帳與
    `not_stuffed` 斷言全都建立在 `of()` 上——覆蓋掉的那列可能正是關鍵資訊。
@@ -68,15 +73,14 @@ def is_ambiguous(x):
 
 
 class Bom(object):
-    def __init__(self, path, sheet=None, ref_col=None, scope="unknown",
+    def __init__(self, path, sheet=None, ref_col=None, scope="complete",
                  expand_ranges=False):
         if openpyxl is None:
             raise RuntimeError("需要 openpyxl：pip install openpyxl")
         if scope not in SCOPES:
             raise ValueError(
                 "bom_scope 必須是 %s 之一（目前 %r）。舊欄位 `bom_kind` 已改名，"
-                "對應：SMT BOM -> smt_only、完整 BOM -> complete、未標註 -> unknown。"
-                "**不得預設為 complete** —— 那會把未知範圍的缺件誤報成真 DNI。"
+                "對應：SMT BOM -> smt_only，其餘一律 complete。"
                 % ("／".join(SCOPES), scope))
         self.path = path
         self.name = os.path.basename(path)
@@ -182,11 +186,18 @@ class Bom(object):
         return sorted(r for r in self.ref if self._pn_str(r).upper() == pn)
 
     def absent_label(self):
-        """netlist 有、BOM 無時該怎麼稱呼它 —— 由 scope 決定，不得一律叫 DNI。"""
-        return "候選 DNI" if self.scope == "complete" else "bom-absent:%s" % self.scope
+        """netlist 有、BOM 無 = 未貼件。BOM 是這塊板的權威。"""
+        return "未貼件 (DNI)"
 
-    def scope_supports_dni(self):
-        return self.scope == "complete"
+    def covers_class(self, is_mech, is_connector):
+        """這份 BOM 的涵蓋範圍包不包含這一類零件。
+
+        ⚠️ 這問的是**文件涵蓋範圍**，不是 BOM 的正確性。SMT BOM 完全正確，
+           只是依定義不列非 SMT 件。
+        """
+        if self.scope != "smt_only":
+            return True
+        return not (is_mech or is_connector)
 
     def __repr__(self):
         return ("<Bom %s [%s] sheet=%s: %d items / %d refdes"

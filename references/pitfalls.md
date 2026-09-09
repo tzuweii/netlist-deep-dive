@@ -202,17 +202,19 @@ latch / reset / select / OE 會**改變元件行為**，但訊號不會從那支
 不是封裝驗證**——兩個封裝同為 1–N 時它必然通過。名字若叫錯，名字本身就在製造
 假保證。
 
-## 17. BOM 範圍決定能不能說「未貼件」
+## 17. BOM 的「涵蓋範圍」與「正確性」是兩件事
 
-「netlist 有、BOM 無」只有在**完整且會列出 DNP 列的 BOM** 上才等於未貼件。
-拿到 SMT BOM 或某個組裝變體時，缺件只代表**不在這份 BOM 的範圍內**。
+**使用者提供的 BOM 就是這塊板的權威**——`netlist 有、BOM 無` 即未貼件 (DNI)。
+不要因為 BOM 被標成某個變體就拒絕下結論，那是把工具的保守當成嚴謹。
 
-**防法**：`bom_scope`（`complete` / `smt_only` / `variant` / `unknown`）。
-只有 `complete` 能稱為候選 DNI，其餘一律標 `bom-absent:<scope>`。
-`not_stuffed` 斷言在 scope 不足時直接 FAIL，回報 `bom-scope-insufficient`——
-**不得靜默跳過**，跳過等於用沉默換綠燈。
+但有一個結構性的例外：**SMT BOM 依定義只列 SMT 件**。連接器、測試點、鎖孔、
+手插件本來就不在裡面，它們的缺席不代表沒貼。實測一塊板：SMT BOM 少了 68 顆
+機構件，全部當 DNI 報出來就是雜訊。
 
-預設是 `unknown`，**不得為了讓斷言通過而改成 complete**。
+**防法**：`bom_scope` 預設 `complete`；拿到 SMT BOM 時標 `smt_only`，工具會
+把非 SMT 類的缺席標為不可判定，SMT 件的缺席照樣認定為 DNI。
+
+⚠️ 這問的是「這份文件涵蓋哪類零件」，**不是「這份 BOM 對不對」**。
 
 ## 18. 重複 refdes 靜默覆蓋
 

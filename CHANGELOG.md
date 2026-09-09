@@ -64,7 +64,7 @@ v1.0.0 新增 `mate_map`（已批准的腳位對映 + `evidence`），載入時�
 |---|---|
 | **傳輸 vs 功能影響** | `signal_chain.csv` 只含已驗證的 `signal_transfer` 邊；control／stateful 去 `topology_hint.csv`，**永不作為 BFS 的下一跳**。分類單位是**邊**不是元件——同一顆 IC 可以同時有 transfer 邊、control 腳與狀態行為 |
 | **證據品質 vs 閘控狀態** | `confidence`（`confirmed`/`caveated`/`unknown`）與 `gating`（`always`/`conditional`/`unknown`）拆成兩欄。合併成一軸會讓「查證完整的 runtime-gated 路徑」排在「package 未佐證但恆通」之下，與事實相反 |
-| **BOM 範圍 vs 未貼件** | `bom_scope` 取代 `bom_kind`。只有 `complete` 能說「候選 DNI」；scope 不足時 `not_stuffed` 直接 FAIL 回報 `bom-scope-insufficient` |
+| **BOM 涵蓋範圍 vs 正確性** | **使用者提供的 BOM 就是這塊板的權威**——缺席即未貼件 (DNI)，不做變體推理。`bom_scope` 標的是**文件涵蓋哪類零件**：`smt_only` 的 BOM 依定義不列連接器/測試點/手插件，那一類的缺席不可判定，但 SMT 件的缺席照樣是 DNI |
 
 ### 封裝判定：只用 netlist + BOM
 
@@ -121,7 +121,7 @@ v0 的 `tests/` 不存在，而 README 的賣點是「把驗證本身也工具�
 | 變更 | 遷移方式 |
 |---|---|
 | `models.json` 的 `pairs` → `transfer` | **不做靜默轉換**。舊 schema 的對稱性正是要修掉的錯誤，直接轉換會把錯誤帶進新 schema。必須重新核對 datasheet 並補 `direction` |
-| `ndd.json` 的 `bom_kind` → `bom_scope` | 給明確錯誤與對應表（SMT BOM → `smt_only`、完整 BOM → `complete`、未標註 → `unknown`）。**不得預設 `complete`** |
+| `ndd.json` 的 `bom_kind` → `bom_scope` | 給明確錯誤與對應表：SMT BOM → `smt_only`，其餘一律 `complete`（預設） |
 | `verified-pins.csv` 舊列 | 一律視為 `unresolved_pending_user`；SHA-256 由 16 字元前綴改為完整值 |
 | 內建 seed model | 已移除，需自行在專案 `models.json` 查證後加入 |
 
@@ -178,8 +178,8 @@ SMT BOM -> smt_only、完整 BOM -> complete、未標註 -> unknown。
 **不得預設 complete** —— 那會把未知範圍的缺件誤報成真 DNI。
 ```
 
-每塊板都要改。**不確定就填 `unknown`**——那只會讓 `not_stuffed` 斷言 FAIL 並
-回報 `bom-scope-insufficient`，不會產生錯誤結論。
+每塊板都要改。**只有拿到 SMT BOM 時填 `smt_only`，其餘一律 `complete`**
+（預設值）。BOM 是這塊板的權威，工具不做變體推理。
 
 #### 3. 其餘新欄位：不用補
 

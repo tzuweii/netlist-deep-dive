@@ -539,12 +539,20 @@ class TestBomAmbiguity(unittest.TestCase):
         b = Bom(p, scope="complete", expand_ranges=True)
         self.assertIsNotNone(b.of("R2"))
 
-    def test_scope_gates_dni_claim(self):
-        self.assertTrue(self._bom([], "complete").scope_supports_dni())
-        for sc in ("smt_only", "variant", "unknown"):
+    def test_bom_is_authoritative_by_default(self):
+        """使用者給的 BOM 就是這塊板的權威 —— 缺席即未貼件，不做變體推理。"""
+        for sc in ("complete", "variant", "unknown", "smt_only"):
             b = self._bom([], sc)
-            self.assertFalse(b.scope_supports_dni())
-            self.assertIn("bom-absent", b.absent_label())
+            self.assertEqual(b.absent_label(), "未貼件 (DNI)")
+
+    def test_smt_bom_does_not_cover_non_smt_classes(self):
+        """唯一的例外是**文件涵蓋範圍**，不是 BOM 的正確性。"""
+        smt = self._bom([], "smt_only")
+        self.assertTrue(smt.covers_class(is_mech=False, is_connector=False))
+        self.assertFalse(smt.covers_class(is_mech=True, is_connector=False))
+        self.assertFalse(smt.covers_class(is_mech=False, is_connector=True))
+        full = self._bom([], "complete")
+        self.assertTrue(full.covers_class(is_mech=True, is_connector=True))
 
     def test_unknown_scope_is_rejected_value(self):
         with self.assertRaises(ValueError):
@@ -575,30 +583,16 @@ class TestAssertionsUnderAmbiguity(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("bom-scope-insufficient", actual)
 
-    def test_variant_bom_can_never_prove_dni(self):
+    def test_variant_bom_still_proves_dni(self):
+        """不做變體推理 —— variant 只是 BOM 的身分註記，判讀等同 complete。"""
         from ndd_audit import run_assertion
         pj = fixtures.Project()
         nl = Netlist(fixtures.write_asc(pj.path("a.asc"), {"R1": "R_0402"},
                                         {"N1": [("R1", "1")]}))
         bom = Bom(fixtures.write_bom(pj.path("a.xlsx"), []), scope="variant")
-        ok, actual = run_assertion(
+        ok, _a = run_assertion(
             {"kind": "not_stuffed", "refdes": "R1"}, nl, bom, {})
-        self.assertFalse(ok)
-        self.assertIn("bom-scope-insufficient", actual)
-
-    def test_not_stuffed_fails_on_ambiguity(self):
-        from ndd_audit import run_assertion
-        pj = fixtures.Project()
-        nl = Netlist(fixtures.write_asc(pj.path("a.asc"), {"R1": "R_0402"},
-                                        {"N1": [("R1", "1")]}))
-        bom = Bom(fixtures.write_bom(
-            pj.path("a.xlsx"),
-            [{"Part Reference": "R1", "Manufacturer_PN": "A"},
-             {"Part Reference": "R1", "Manufacturer_PN": "B"}]), scope="complete")
-        ok, actual = run_assertion(
-            {"kind": "not_stuffed", "refdes": "R1"}, nl, bom, {})
-        self.assertFalse(ok, "ambiguity 必須 FAIL，不得靜默跳過")
-        self.assertIn("ambiguous", str(actual))
+        self.assertTrue(ok)
 
 
 if __name__ == "__main__":

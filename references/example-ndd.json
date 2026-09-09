@@ -10,11 +10,12 @@
 
   "boards": {
     "_說明": [
-      "bom_scope 決定能不能說『未貼件』——這是本檔最容易填錯、後果最大的欄位。",
-      "  complete  完整 BOM（會列出 DNP 列）-> netlist 有而 BOM 無 = 候選 DNI",
-      "  smt_only  只有 SMT 件 -> 連接器/測試點/鎖孔本來就不在裡面",
-      "  variant   某個組裝變體",
-      "  unknown   還沒確認（**預設**，不得為了讓斷言通過而改成 complete）",
+      "BOM 是這塊板的權威：netlist 有、BOM 無 = 未貼件 (DNI)。不做變體推理。",
+      "bom_scope 標的是**文件涵蓋範圍**，不是 BOM 的正確性：",
+      "  complete  涵蓋全部佈件（**預設**）",
+      "  smt_only  只涵蓋 SMT 件 -> 連接器/測試點/鎖孔/手插件的缺席不可判定，",
+      "            但 SMT 件的缺席照樣是 DNI",
+      "  variant / unknown  BOM 身分的註記，判讀等同 complete",
       "舊欄位 `bom_kind` 已改名為 `bom_scope`，載入舊檔會給明確錯誤。"
     ],
     "board_a": {
@@ -109,7 +110,7 @@
     {"board": "board_a", "kind": "count_pn", "pn": "BUF_A", "expect": 4,
      "desc": "BUF_A 共 4 顆"},
     {"board": "board_a", "kind": "not_stuffed", "refdes": ["R9", "R10"],
-     "desc": "R9/R10 未貼件（⚠️ 只有 bom_scope=complete 才可能 PASS）"}
+     "desc": "R9/R10 未貼件 (DNI)"}
   ],
 
   "role_rules": [

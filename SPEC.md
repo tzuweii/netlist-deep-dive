@@ -63,7 +63,7 @@
 | package `unresolved_pending_user` | `audit`、`coverage`、`REVIEW.md` | 待辦，非錯誤 |
 | package `conflict` | `audit` | FAIL，停走該 model |
 | BOM ambiguity | `audit` [3]、相關 assertion | FAIL，列出衝突列號 |
-| `bom-scope-insufficient` | `audit` [3]、相關 assertion | 不得 PASS |
+| `bom-scope-insufficient`（僅 SMT BOM 的非 SMT 件） | `audit` [3]、相關 assertion | 不得 PASS |
 | 未宣告 endpoint（`unclassified`） | `coverage`、`REVIEW.md` | 待辦，非錯誤 |
 
 - [ ] 「待辦」與「錯誤」在輸出上必須可區分，且待辦不得讓 `audit` 假性通過。
@@ -402,14 +402,18 @@ from/to 關係與方向。
 
 不實作完整 variant engine，但必須避免把未知 BOM 範圍誤稱 DNI。
 
-- [ ] board 設定新增 `bom_scope: complete | smt_only | variant | unknown`。
-- [ ] `complete` 才可將 netlist 有、BOM 無的合格電子件標為候選 DNI。
-- [ ] `smt_only`、`variant`、`unknown` 的缺件標 `bom-absent:<scope>`，不是「真 DNI」。
-- [ ] `not_stuffed` assertion 只有在 scope 足以支持時才可 PASS；否則輸出
-  `bom-scope-insufficient`。
+**使用者提供的 BOM 就是這塊板的權威**：`netlist 有、BOM 無` = 未貼件 (DNI)。
+工具不做變體推理，也不質疑 BOM 的正確性。
 
-**驗收：** 重複 refdes、範圍 refdes、variant BOM 缺件三種 fixture 都不可得到
-靜默 PASS 或「真 DNI」。
+唯一的例外是**文件涵蓋範圍**（不是正確性）：
+
+- [ ] board 設定新增 `bom_scope`，預設 `complete`。
+- [ ] `smt_only` 的 BOM 依定義不列連接器/測試點/鎖孔/手插件 —— 那一類的缺席
+  標 `bom-scope-insufficient`，**但 SMT 件的缺席照樣是 DNI**。
+- [ ] `variant` / `unknown` 保留為 BOM 身分註記，判讀等同 `complete`。
+
+**驗收：** 重複 refdes 與範圍 refdes 不可靜默 PASS；SMT BOM 的連接器缺席
+不可判為 DNI，但 SMT 件缺席必須判為 DNI。
 
 ---
 

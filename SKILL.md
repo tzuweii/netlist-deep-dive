@@ -59,8 +59,11 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
    ⚠️ 判定「缺 datasheet」之前要用**全文**複核，不能只比檔名——family datasheet
    必然漏判。誤報「缺」會害人重複採購已持有的規格書。
 
-2. **有無貼件受限於 BOM 範圍。** netlist 有 ≠ 板上有；BOM 沒有 ≠ 沒貼。
-   只有 `bom_scope: complete` 能說「候選 DNI」，其餘一律 `bom-absent:<scope>`。
+2. **BOM 是這塊板的權威。** netlist 有、BOM 無 = **未貼件 (DNI)**。
+   工具不做變體推理，也不質疑使用者提供的 BOM。
+
+   唯一的例外是**文件涵蓋範圍**（不是正確性）：`bom_scope: smt_only` 的
+   BOM 依定義不列連接器、測試點、鎖孔、手插件，那一類的缺席不可判定。
 
 3. **`always` 要付證明，`conditional` 是預設。** 說某條路徑恆通，必須拿出
    netlist 上 enable 腳實際接法的證據。runtime 選通、外部驅動、懸空、未知
@@ -120,8 +123,9 @@ PYTHONIOENCODING=utf-8 python scripts/ndd.py init "C:/path/to/analysis"
 與次佳差距 < 30% 會標 `!! 需人工確認`。
 
 2. 人工補完 `ndd.json`（`init` 會寫出所有欄位的空殼）：
-   - `boards[*].bom_scope` — **`complete` / `smt_only` / `variant` / `unknown`**。
-     預設 `unknown`，**不得為了讓斷言通過而改成 complete**。
+   - `boards[*].bom_scope` — 預設 `complete`（BOM 即權威）。只有拿到
+     **SMT BOM** 時要改成 `smt_only`，那會讓連接器/測試點/手插件的缺席
+     標為不可判定，而非未貼件。
    - `mates` — 連接器對接關係
    - `mate_map` — **已批准**的腳位對映（可以先留空，見 Phase 4）
    - `endpoints` — refdes 或料號 → `terminal` / `stateful` / `unknown_stop`
@@ -289,7 +293,7 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 - **不要讓單向元件雙向走。** `direction` 必須來自 datasheet。
 - **不要用腳數推封裝。** netlist 只有已接腳。封裝由電源腳接法等證據排名判定。
 - **推論出來的封裝一律標 `[?]`。** 它不是查證過的事實。
-- **不要說「未貼件」除非 `bom_scope: complete`。**
+- **BOM 缺席就是未貼件**，除非該類零件不在該 BOM 的涵蓋範圍內（SMT BOM 的連接器/機構件）。
 - **不要把 `mate:unapproved` 的路徑講成已確認對接。**
 - **不要預先大量建模。** 要預先投資就投資在補 datasheet。
 - **不要為了「看起來完整」而省略證據表。** 沒標記的主張等於自承未查證。
