@@ -128,6 +128,28 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 
 ## Phase 0 — 收檔案、建專案（`init` 一次跑完）
 
+### ⚠️ 先確認這個資料夾是不是已經建過專案
+
+```bash
+python scripts/ndd.py version          # 這台機器裝的是哪一版
+ls <分析資料夾>/ndd.json               # 已經有就**不要跑 init**
+```
+
+**已有 `ndd.json` 就走 `migrate`，不要跑 `init`：**
+
+```bash
+python scripts/ndd.py migrate "<分析資料夾>" --run
+```
+
+`init` 會覆蓋設定檔——手寫的斷言、命名規則、對接關係全部消失。工具會擋下來
+並指向 `migrate`，但**不要靠工具擋**：看到資料夾裡有 `ndd.json` 就該直接用
+`migrate`。
+
+`migrate --run` 會升級設定、還原 v0 內建的模型（只加專案用得到的）、重跑所有
+流程並產出升級報告，**保留使用者手寫的東西**。
+
+---
+
 1. 每塊板一份 `.asc` + 一份 BOM，丟進同一個資料夾。缺 BOM 就先問。
 
 2. **先看 init 打算怎麼做**（只讀，不寫任何檔案）：

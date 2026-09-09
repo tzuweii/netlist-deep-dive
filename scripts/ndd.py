@@ -21,6 +21,7 @@
     python ndd.py coverage                    # per-MPN 三源覆蓋狀況
     python ndd.py blockers                    # 訊號鏈停在哪些料號上（建模投報率）
     python ndd.py migrate <分析資料夾> --run  # v0 專案一鍵升級並跑完所有流程
+    python ndd.py version                     # 這台機器裝的是哪一版
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
 
@@ -408,10 +409,89 @@ SETUP_TMPL = u"""# 專案建立報告
 """
 
 
+def _handcrafted(cfg):
+    """設定裡有多少是人工寫的、重跑 init 會消失的東西。"""
+    out = []
+    for key, label in (("assertions", "條斷言"), ("role_rules", "條命名規則"),
+                       ("net_normalize", "條 net 正規化規則"),
+                       ("mates", "組對接"), ("mate_map", "組已批准腳位對映"),
+                       ("part_package", "筆封裝指定"), ("endpoints", "筆端點宣告")):
+        n = len(cfg.get(key) or [])
+        if n:
+            out.append("%d %s" % (n, label))
+    t = (cfg.get("trace") or {}).get("start") or []
+    if t:
+        out.append("%d 個 trace 起點" % len(t))
+    return out
+
+
+def _guard_existing(d, force):
+    """既有 ndd.json 的處理。
+
+    ⚠️ 舊版只說「已存在，要覆蓋請加 --force」—— 那句話等於**教使用者把自己
+       手寫的斷言、命名規則、對接關係全部刪掉**。實測一個真實專案：照做會
+       毀掉 63 條斷言、12 條 net 正規化規則、16 組對接。
+
+       v0 的設定要走 `migrate`（保留手寫內容），不是重跑 init。
+    """
+    p = os.path.join(d, CONFIG_NAME)
+    if not os.path.exists(p):
+        return
+    try:
+        with io.open(p, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    except Exception:
+        cfg = {}
+    is_v0 = any("bom_kind" in b for b in (cfg.get("boards") or {}).values())
+    hand = _handcrafted(cfg)
+
+    if is_v0:
+        raise SystemExit(
+            "%s 是 **v0 格式**的設定（用 bom_kind）。\n"
+            "  **不要重跑 init** —— 那會覆蓋掉你手寫的內容%s。\n"
+            "  請改用：ndd.py migrate \"%s\" --run\n"
+            "  它會升級設定、還原原本內建的模型、重跑所有流程，並保留你寫的東西。"
+            % (p, ("（%s）" % "、".join(hand)) if hand else "", d))
+    if hand and not force:
+        raise SystemExit(
+            "%s 已存在，且含有手寫內容：%s\n"
+            "  重跑 init 會**全部覆蓋**。確定要重建請加 --force；\n"
+            "  若只是想升級格式或重跑流程，用 ndd.py migrate \"%s\" --run。"
+            % (p, "、".join(hand), d))
+    if not force:
+        raise SystemExit("%s 已存在（無手寫內容）。要重建請加 --force。" % p)
+
+
+def cmd_version(args):
+    """印出 skill 版本 —— 讓人（與 AI）能確認裝的是哪一版。"""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ver = "(未知)"
+    vf = os.path.join(root, "VERSION")
+    if os.path.exists(vf):
+        ver = io.open(vf, encoding="utf-8").read().strip()
+    rev = ""
+    try:
+        rev = subprocess.check_output(["git", "-C", root, "describe", "--tags", "--always"],
+                                      stderr=subprocess.PIPE).decode().strip()
+    except Exception:
+        rev = "(不在 git 工作區 —— 可能是用壓縮檔安裝的)"
+    print("netlist-deep-dive %s" % ver)
+    print("  安裝位置 %s" % root)
+    print("  git      %s" % rev)
+    print("")
+    print("更新：在上面那個目錄下 `git pull`；不是 git 工作區就重新 clone。")
+    print("既有專案升級：ndd.py migrate <分析資料夾> --run")
+    return ver
+
+
 def cmd_init(args):
     import datetime
     d = os.path.abspath(args.dir)
     if not args.run:
+        cfgp = os.path.join(d, CONFIG_NAME)
+        if os.path.exists(cfgp):
+            print("⚠️ %s 已存在 —— 這個資料夾已經建過專案。" % CONFIG_NAME)
+            print("   要升級或重跑流程請用：ndd.py migrate \"%s\" --run\n" % d)
         _plan(d)
         return
 
@@ -462,8 +542,7 @@ def cmd_init(args):
         "datasheets": {"dir": "datasheets", "parts": []},
     }
     p = os.path.join(d, CONFIG_NAME)
-    if os.path.exists(p) and not args.force:
-        raise SystemExit("%s 已存在，要覆蓋請加 --force" % p)
+    _guard_existing(d, args.force)
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(cfg, indent=2, ensure_ascii=False))
     print("寫出 %s" % p)
@@ -1690,6 +1769,7 @@ def main(argv=None):
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)
+    p = sub.add_parser("version"); p.set_defaults(func=cmd_version, noproj=True)
     p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")
     p.add_argument("--run", action="store_true", help="升級設定後一路跑完所有流程")
     p.add_argument("--no-models", action="store_true", help="不還原 v0 的內建模型")

@@ -21,14 +21,45 @@ netlist 是逐 net 的文字檔，人工追一條跨板訊號要翻很多層；�
 ## 安裝
 
 ```bash
-git clone <this repo> .claude/skills/netlist-deep-dive
+git clone https://github.com/tzuweii/netlist-deep-dive .claude/skills/netlist-deep-dive
 ```
 
 需求：Python 3.8+、`openpyxl`、`pypdf`、`curl`（下載 datasheet 用，非必要）。
 
 ```bash
-python -m unittest discover -s tests     # 回歸測試
+cd .claude/skills/netlist-deep-dive
+python -m unittest discover -s tests    # 應為 OK
+python scripts/ndd.py version           # 確認裝的是哪一版
 ```
+
+## 更新
+
+**先確認裝在哪、是哪一版：**
+
+```bash
+python scripts/ndd.py version
+```
+
+**如果是 git clone 裝的：**
+
+```bash
+cd <上面印出的安裝位置>
+git pull
+python -m unittest discover -s tests
+```
+
+**如果不是 git 工作區**（用壓縮檔或複製檔案安裝的，`version` 會告訴你）：
+重新 clone 一份取代舊目錄即可 —— skill 本身不保存任何專案資料。
+
+**然後升級每個既有的分析資料夾：**
+
+```bash
+python scripts/ndd.py migrate "C:/path/to/analysis" --run
+```
+
+⚠️ **既有專案不要重跑 `init`。** `init` 會覆蓋 `ndd.json`，手寫的斷言、命名
+規則、對接關係都會消失（實測一個真實專案：63 條斷言、12 條正規化規則、
+16 組對接）。工具會擋下來並指向 `migrate`，但還是知道一下比較好。
 
 ## 使用
 

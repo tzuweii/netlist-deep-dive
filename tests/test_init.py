@@ -120,6 +120,38 @@ class TestInitRun(unittest.TestCase):
         with self.assertRaises(SystemExit):
             ndd.main(["init", d, "--run", "--no-datasheets"])
 
+    def test_v0_config_sends_you_to_migrate_not_force(self):
+        """舊版說「要覆蓋請加 --force」，那等於教使用者刪掉自己手寫的東西。"""
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        p = os.path.join(d, "ndd.json")
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        for b in cfg["boards"].values():
+            b["bom_kind"] = "完整BOM"
+            b.pop("bom_scope", None)
+        cfg["assertions"] = [{"board": "x", "kind": "net_exists", "net": "N",
+                              "desc": "手寫的"}]
+        io.open(p, "w", encoding="utf-8").write(
+            json.dumps(cfg, ensure_ascii=False, indent=2))
+        for argv in (["init", d, "--run"], ["init", d, "--run", "--force"]):
+            with self.assertRaises(SystemExit) as cm:
+                ndd.main(argv)
+            msg = str(cm.exception)
+            self.assertIn("migrate", msg)
+            self.assertIn("1 條斷言", msg, "要講出會失去什麼")
+
+    def test_handcrafted_v1_config_warns_before_overwrite(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        p = os.path.join(d, "ndd.json")
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        cfg["net_normalize"] = [["^TX_", ""]]
+        io.open(p, "w", encoding="utf-8").write(
+            json.dumps(cfg, ensure_ascii=False, indent=2))
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["init", d, "--run"])
+        self.assertIn("net 正規化規則", str(cm.exception))
+
     def test_single_board_project_still_completes(self):
         """只有一塊板時沒有對接可偵測，但流程仍要跑完。"""
         d = _folder(two_boards=False)
