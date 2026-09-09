@@ -11,7 +11,7 @@
 元件、落在合理的網路上、看起來毫無破綻，但整張表是錯的。
 
 **防法**：`ndd_models.py` 強制每個模型要有 `verified_against`（檔名 + 頁碼 +
-文件編號）與 `package_basis`，沒有就拒絕載入。翻 datasheet 的 Pin Configuration
+文件編號），沒有就拒絕載入。翻 datasheet 的 Pin Configuration
 那一頁，不要相信「這顆跟那顆應該一樣」。
 
 **本 skill 不內建任何 seed model** —— 預先建模等於把「你對 datasheet 的解讀」

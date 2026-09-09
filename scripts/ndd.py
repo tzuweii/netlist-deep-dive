@@ -738,7 +738,7 @@ REVIEW_TMPL = u"""# 人工複驗清單
 
 - [ ] 每條 transfer 邊的 `direction` 都真的翻過 datasheet？**單向元件不得雙向走。**
 - [ ] 每條邊的 `verified_against` 都真的翻過那一頁？
-- [ ] `package_basis` 是 `exact_table` 者，`package` 是否為腳位表的實際欄標題？
+- [ ] `pin_roles` 的 VSS/VDD 腳號是否真的翻過 datasheet？（封裝判定全靠它）
 - [ ] 有沒有用到**相近型號**的腳位當成同一顆？
 
 ### B2. 連接器對接
@@ -756,7 +756,15 @@ REVIEW_TMPL = u"""# 人工複驗清單
 - [ ] **BOM 缺件**：{absent}
 - [ ] **懸空（單腳）網路**：{floating}
 
-### B4. 待指定的 package
+### B4. 封裝判定
+**`[?]` 標記的封裝是由 netlist/BOM 推論出來的，不是查證過的事實。**
+
+{inferred}
+
+- [ ] 上列每一項是否已人工複核？確認後填入 `ndd.json` 的 `part_package`。
+
+待補（證據不足，工具拒絕推論）：
+
 {pending}
 
 ### B5. 未分類端點
@@ -802,7 +810,10 @@ def cmd_review(args, pj):
         floating="; ".join("%s: %d 條" % (k, len(v))
                            for k, v in stats["floating"].items()),
         pending=("\n".join("- [ ] %s" % x for x in stats["model_pending"])
-                 or "- （無）"))
+                 or "- （無）"),
+        inferred=("\n".join("- [ ] %s" % x
+                            for x in stats.get("model_inferred", []))
+                  or "- （無推論項目）"))
     p = os.path.join(pj.dir, "REVIEW.md")
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(txt)

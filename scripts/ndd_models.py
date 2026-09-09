@@ -132,7 +132,7 @@ def load_models(project_dir=None):
     """載入專案 `models.json` 並強制驗證。
 
     ⚠️ 本 skill **不內建 seed model**。初版帶的四個 seed 是 `pairs` schema、
-       無 `package_basis`，在新規格下無法載入；而通用型 skill 不應把任何特定
+       在新規格下無法載入；而通用型 skill 不應把任何特定
        料號當成預設知識。要用就在專案的 `models.json` 自行查證後加入。
     """
     models = {}
@@ -346,9 +346,12 @@ def describe(models):
     lines = []
     for name, m in sorted(models.items()):
         edges = transfer_edges(m)
-        lines.append("%-16s %-14s %2d 條 transfer  package=%s(%s)  查證: %s"
+        roles = m.get("pin_roles") or {}
+        lines.append("%-16s %-14s %2d 條 transfer  package=%s  pin_roles=%s  查證: %s"
                      % (name, m.get("kind", "?"), len(edges),
-                        m.get("package", "-"), m.get("package_basis", "?"),
+                        m.get("package", "-"),
+                        ",".join("%s:%s" % kv for kv in sorted(roles.items()))
+                        or "（無，多封裝時無法判別）",
                         m.get("verified_against", "-")))
         for a, b, d, _e in edges:
             lines.append("        %s %s %s" % (
