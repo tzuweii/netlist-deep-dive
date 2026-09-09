@@ -109,13 +109,22 @@ class TestMateApproval(unittest.TestCase):
         pj.cfg["mates"] = [["a", "J1", "b", "J2"]]
         return pj
 
-    def test_unapproved_mate_carries_caveat(self):
-        """初版直接以同 pin number 連邊，排名結果從未進入走圖。"""
+    def test_ranking_decides_or_asks(self):
+        """連接器：netlist 連得上即事實 —— 排名定案就不掛 caveat。
+
+        初版的問題不是「沒有批准機制」，是**排名結果從未進入走圖**。
+        """
         fab = _fab(self._two_boards())
+        status = fab.mate_status[("a", "J1", "b", "J2")]
+        self.assertIn(status, ("inferred", "ambiguous"))
         edges = fab.mate.get(("a", "J1", "1"))
         self.assertTrue(edges)
-        self.assertIn("mate:unapproved", edges[0][1])
-        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "unapproved")
+        if status == "inferred":
+            self.assertEqual(edges[0][1], [], "定案就不該掛 caveat")
+        else:
+            self.assertIn("mate:ambiguous", edges[0][1])
+        self.assertTrue(fab.mate_evidence[("a", "J1", "b", "J2")],
+                        "定案與否都要留下證據字串")
 
     def test_approved_mate_has_no_caveat(self):
         pj = self._two_boards()

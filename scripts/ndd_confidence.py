@@ -32,7 +32,9 @@ GATING_ORDER = [ALWAYS, CONDITIONAL, UNKNOWN]
 # 每個 caveat 只能**降低**一條邊的證據品質，不能提高。新增 caveat 時務必在此
 # 登錄，否則它不會影響 confidence，等於標了卻沒有效果。
 CAVEAT_CEILING = {
-    "mate:unapproved":            CAVEATED,
+    # 連接器：netlist 連得上即事實。排名定案就不掛 caveat；只有排名決定不了
+    # 才是真的未知（見 ndd_graph._rank_decides）。
+    "mate:ambiguous":             UNKNOWN,
     "mate:missing":               UNKNOWN,
     "package:inferred":           CAVEATED,   # 由 netlist/BOM 推出，非人工確認
     "package:unresolved":         UNKNOWN,

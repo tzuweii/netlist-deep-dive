@@ -343,11 +343,15 @@ def cmd_trace(args, pj):
         raise SystemExit("ndd.json 的 trace.start 是空的，例如 "
                          '[{"board":"ecu","conn":"J902","rail":"P"}]')
     fab = pj.fabric()
-    unapproved = [k for k, v in fab.mate_status.items() if v != "approved"]
-    if unapproved:
-        print("!! 有 %d 組對接尚未批准腳位對映（ndd.json 的 mate_map）。" % len(unapproved))
-        print("   trace 仍會跑，但這些路徑帶 mate:unapproved —— 它們是**候選路徑**，")
-        print("   不是已確認的線束／板對板對接結論。")
+    amb = [k for k, v in fab.mate_status.items() if v == "ambiguous"]
+    inf = [k for k, v in fab.mate_status.items() if v == "inferred"]
+    if inf:
+        print("   %d 組對接由拓樸排名定案 [?]（netlist 連得上即事實）。" % len(inf))
+    if amb:
+        print("!! %d 組對接**排名無法定案**，下游路徑帶 mate:ambiguous：" % len(amb))
+        for ba, ra, bb, rb in amb:
+            print("   %s.%s <-> %s.%s —— %s"
+                  % (ba, ra, bb, rb, fab.mate_evidence.get((ba, ra, bb, rb), "")))
         print("")
     slot_rx = re.compile(tcfg.get("slot_pattern") or "$^")
     rows = []

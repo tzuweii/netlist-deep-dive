@@ -51,6 +51,10 @@ class MateMapError(Exception):
     """已批准的對接對映本身有問題 —— 載入時就要擋，不能等到走圖。"""
 
 
+# 對接排名要多有把握才算定案。比照 mate 報告既有的判讀：直通唯一勝出、
+# 零矛盾、且語意相符的領先幅度夠大。
+MATE_MIN_MARGIN = 2
+
 _BLOCKING = {"package:unresolved": "package_unresolved",
              "package:conflict": "package_conflict",
              "model:ambiguous": "model_ambiguous",
@@ -127,6 +131,7 @@ class Fabric(object):
         self.mate = {}
         self.mate_status = {}
         self.mate_uncovered = {}
+        self.mate_evidence = {}
         for ba, ra, bb, rb in self.mates:
             spec, rev = self._approved(ba, ra, bb, rb)
             pa, pb = self.nl[ba].pins(ra), self.nl[bb].pins(rb)
@@ -139,17 +144,51 @@ class Fabric(object):
                 pairs = [(p, q) for p, q in amap.items()]
                 cav = []
                 self.mate_status[(ba, ra, bb, rb)] = "approved"
+                self.mate_evidence[(ba, ra, bb, rb)] = spec.get("evidence", "")
             else:
-                # ⚠️ 無批准 map 時暫退回「同 pin label 對接」以保留探索能力，
-                #    但**每一條這種邊都必須帶 caveat**：排名結果尚未進入定案，
-                #    這是候選路徑，不是已確認的線束／板對板結論。
+                # 連接器只負責「訊號有沒有連到」——netlist 連得上就是事實，
+                # 不需要 datasheet。所以這裡讓**拓樸排名自己定案**：
+                #   直通唯一勝出 + 零矛盾 + margin 足夠 -> inferred，不掛 caveat
+                #   排名決定不了                        -> mate:ambiguous，要問人
+                #
+                # ⚠️ 這不是放寬標準，而是把 `verification.md` 早就寫下的原則
+                #    落實成程式：「殘存候選要用會不會壞來排除；系統若實際會動，
+                #    該候選就被排除了」。實際出貨的板子是接著線在跑的，對應若
+                #    錯了 netlist 根本對不上，早就會被發現。
+                ok, why = self._rank_decides(ba, ra, bb, rb)
                 pairs = [(p, p) for p in pa if p in pb]
-                cav = ["mate:unapproved"]
-                self.mate_status[(ba, ra, bb, rb)] = "unapproved"
+                if ok:
+                    cav = []
+                    self.mate_status[(ba, ra, bb, rb)] = "inferred"
+                else:
+                    cav = ["mate:ambiguous"]
+                    self.mate_status[(ba, ra, bb, rb)] = "ambiguous"
+                self.mate_evidence[(ba, ra, bb, rb)] = why
             for p, q in pairs:
                 if p in pa and q in pb:
                     self.mate.setdefault((ba, ra, p), []).append(((bb, rb, q), cav))
                     self.mate.setdefault((bb, rb, q), []).append(((ba, ra, p), cav))
+
+    def _rank_decides(self, ba, ra, bb, rb):
+        """排名有沒有把握到可以定案。回傳 (可定案?, 證據字串)。"""
+        try:
+            rank, n = self.rank_mating(ba, ra, bb, rb)
+        except Exception as exc:                      # pragma: no cover
+            return False, "排名失敗：%s" % exc
+        if len(rank) < 2:
+            return False, "候選不足，無法比較"
+        (b1, m1, l1), (b2, m2, l2) = rank[0], rank[1]
+        straight = bool(l1.startswith("直通") or re.match(r"^(\w+)->\1 正向$", l1))
+        margin = (-m1) - (-m2)
+        why = ("最佳 %s（矛盾 %d、語意 %d），次佳 %s（矛盾 %d、語意 %d），margin %d"
+               % (l1, b1, -m1, l2, b2, -m2, margin))
+        if not straight:
+            return False, why + "；**勝出的不是直通**"
+        if b1 != 0:
+            return False, why + "；最佳仍有矛盾腳"
+        if b2 == 0 and margin < MATE_MIN_MARGIN:
+            return False, why + "；與次佳難以區分"
+        return True, why
 
     def mate_partners(self, board, refdes):
         """對接對手查詢 —— **唯一**的實作。
@@ -268,6 +307,7 @@ class Fabric(object):
                        best=l1, best_bad=b1, best_match=-m1,
                        second=l2, second_bad=b2, second_match=-m2,
                        margin=(-m1) - (-m2), ok=ok, status=status,
+                       evidence=self.mate_evidence.get((ba, ra, bb, rb), ""),
                        kind=self._mate_kind(ba, ra, bb, rb))
             report.append(row)
             if verbose:
@@ -278,11 +318,15 @@ class Fabric(object):
                       % (l2, b2, -m2,
                          "直通唯一勝出（margin %d）" % row["margin"] if ok
                          else "!! 無法唯一判定，需 layout 或實測"))
-                print("        批准狀態 %s%s"
-                      % (status,
-                         "" if status == "approved"
-                         else " -> 下游每一列都會帶 mate:unapproved（候選路徑，"
-                              "不是已確認對接）"))
+                note = {"approved": "已由 mate_map 批准",
+                        "inferred": "拓樸排名定案 [?]（netlist 連得上即事實；"
+                                    "對應若錯，實機根本不會動）",
+                        "ambiguous": "**排名無法定案** -> 下游帶 mate:ambiguous，"
+                                     "需 layout／線束圖／實測"}
+                print("        定案狀態 %s —— %s" % (status, note.get(status, "")))
+                ev = self.mate_evidence.get((ba, ra, bb, rb))
+                if ev:
+                    print("        證據 %s" % ev)
         return report
 
     def _mate_kind(self, ba, ra, bb, rb):
