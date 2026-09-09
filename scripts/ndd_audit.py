@@ -33,6 +33,26 @@ def _expand_pins(spec):
     return [str(spec)]
 
 
+def dni_provable(nl, bom, refdes):
+    """這塊板的 BOM 範圍，能不能證明這顆 refdes「沒貼」？
+
+    ⚠️ 「只有 complete 才能說 DNI」這條規則**太粗**。實測真實專案：一顆 SMT
+       電晶體缺席於 SMT BOM，那個缺席**是有意義的**——SMT BOM 本來就該列出
+       所有 SMT 件。不能證明的只有「本來就不在這份 BOM 範圍內」的東西：
+       機構件、測試點、連接器、手插件。
+    """
+    if bom.scope == "complete":
+        return True, ""
+    if bom.scope != "smt_only":
+        return False, "scope=%s，該 BOM 只涵蓋部分佈件" % bom.scope
+    if nl.is_mech(refdes):
+        return False, "機構/測試點不在 SMT BOM 範圍內"
+    fp = (nl.parts.get(refdes) or "")
+    if fp.lower().startswith("conn") or re.match(r"^J\d", refdes):
+        return False, "連接器/手插件不在 SMT BOM 範圍內"
+    return True, ""
+
+
 def run_assertion(a, nl, bom, models):
     """回傳 (ok, 實際值字串)。新增 kind 時務必同步更新 references/pitfalls.md。"""
     k = a["kind"]
@@ -66,10 +86,12 @@ def run_assertion(a, nl, bom, models):
     if k == "not_stuffed":
         # ⚠️ 只有 complete BOM 才能證明「沒貼」。SMT BOM／變體／未知範圍的缺件
         #    只代表不在這份 BOM 的範圍內，不是未貼件。
-        if not bom.scope_supports_dni():
-            return False, ("bom-scope-insufficient（scope=%s，無法證明未貼件）"
-                           % bom.scope)
         rds = a["refdes"] if isinstance(a["refdes"], list) else [a["refdes"]]
+        blocked = [(r, why) for r, why in
+                   ((r, dni_provable(nl, bom, r)[1]) for r in rds) if why]
+        if blocked:
+            return False, ("bom-scope-insufficient：%s"
+                           % "；".join("%s（%s）" % x for x in blocked[:3]))
         amb = [r for r in rds if is_ambiguous(bom.of(r))]
         if amb:
             return False, "bom:ambiguous %s" % amb

@@ -25,6 +25,7 @@ netlist 與 BOM：
 import re
 
 import ndd_confidence as C
+from ndd_models import mpn_matches as _mpn_matches
 
 # 判定結果
 USER_CONFIRMED = "user_confirmed"      # ndd.json 明確宣告
@@ -208,26 +209,6 @@ def _pkg_matches(want, declared):
         return False
     a, b = str(want).upper(), str(declared).upper()
     return a in b or b in a
-
-
-def _mpn_matches(token, mpn):
-    """料號比對：允許**訂購碼後綴**，但不允許不同料號互撞。
-
-    `PCA9554B` 應該對上 `PCA9554BPW`（`PW` 是封裝/包裝碼），
-    但 `LM358` **不可**對上 `LM3584`（`4` 是另一顆料）。
-
-    判準：多出來的部分必須以**字母**開頭。訂購碼後綴一律是字母段，
-    而料號的延伸幾乎都是數字。
-    """
-    t, m = token.upper(), (mpn or "").upper()
-    if not t or not m:
-        return False
-    if t == m:
-        return True
-    if m.startswith(t):
-        rest = m[len(t):].lstrip("-_")
-        return bool(rest) and rest[0].isalpha()
-    return False
 
 
 def _candidates_for(models, footprint, pn):

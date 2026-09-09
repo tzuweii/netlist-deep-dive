@@ -151,6 +151,31 @@ def _tokens(m):
     return [t for t in m.get("match", []) if t]
 
 
+def mpn_matches(token, mpn):
+    """料號比對的**唯一**規則：允許訂購碼後綴，但不允許不同料號互撞。
+
+    `PCA9547` 應該對上 `PCA9547BS,118`（`BS` 是封裝碼、`,118` 是包裝碼），
+    但 `LM358` **不可**對上 `LM3584`（`4` 是另一顆料）。
+
+    判準：多出來的部分必須以**字母**開頭。訂購碼後綴一律是字母段，而料號的
+    延伸幾乎都是數字。
+
+    ⚠️ 曾經有兩處各自實作（`ndd_package` 認得後綴、這裡不認），導致同一顆
+       PCA9547BS,118 在走圖時找得到模型、在 i2c_addr 斷言時找不到。
+       任何需要「BOM 料號 vs 模型 match token」的地方都必須用這個函式。
+    """
+    t = (token or "").upper().strip()
+    m = (mpn or "").upper().strip().split(",")[0]
+    if not t or not m:
+        return False
+    if t == m:
+        return True
+    if m.startswith(t):
+        rest = m[len(t):].lstrip("-_")
+        return bool(rest) and rest[0].isalpha()
+    return False
+
+
 def select_model(models, footprint, pn="", package=None):
     """回傳 (name, model, caveats)。
 
@@ -163,7 +188,7 @@ def select_model(models, footprint, pn="", package=None):
     hay = "%s|%s" % (fp_u, pn_u)
 
     exact = [(k, m) for k, m in models.items()
-             if any(t.upper() == pn_u for t in _tokens(m)) and pn_u]
+             if pn_u and any(mpn_matches(t, pn_u) for t in _tokens(m))]
     if len(exact) == 1:
         return _package_filter(exact[0][0], exact[0][1], package)
     if len(exact) > 1:
@@ -267,11 +292,30 @@ def referenced_pins(m):
 
 
 def missing_pins(m, observed):
-    """⚠️ 這是 **pin-existence sanity check，不是 package 驗證**。
+    """⚠️ 這是 **pin-existence sanity check，不是封裝驗證**。
 
-    兩個封裝同為 1–N 而腳位定義不同時，它必然通過。它能抓的是打錯、以及照抄
-    了不同衍生型號的 model。名稱若叫「封裝驗證」，名字本身就在製造假保證。
+    兩個封裝同為 1–N 而腳位定義不同時，它必然通過。它能抓的是：模型套到了
+    完全不同的元件、或腳號格式不相容（數字模型套到 BGA 件）。
+
+    ⚠️ **部分腳未接不算錯。** 實測真實板子：一顆 8 通道緩衝器只用了 6 個通道，
+       未用通道的輸出腳本來就不接，於是「模型引用的腳不在 netlist」——但那是
+       正常設計，不是模型錯誤。netlist 只含**已接腳**，所以判準必須是
+       「完全沒有交集」而不是「有任何一支缺」。
+
+       這與 `pin_roles` 的規則不同：宣告的 GND/PWR 腳未接**是**矛盾，因為
+       電源腳不會 NC。訊號腳會。
     """
+    ref = referenced_pins(m)
+    if not ref:
+        return []
+    obs = set(observed)
+    if ref & obs:
+        return []                      # 有交集 = 模型對得上，其餘是未用通道
+    return sorted(ref)
+
+
+def unused_pins(m, observed):
+    """模型引用、但該顆未接的腳 —— 未用通道，供 review 參考，不是錯誤。"""
     return sorted(referenced_pins(m) - set(observed))
 
 

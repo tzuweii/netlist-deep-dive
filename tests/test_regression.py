@@ -403,9 +403,22 @@ class TestModelSelection(unittest.TestCase):
 
 
 class TestPinExistence(unittest.TestCase):
-    def test_missing_pin_detected(self):
+    def test_partially_unconnected_pins_are_not_an_error(self):
+        """實測真實板子：8 通道緩衝器只用 6 個，未用通道的腳本來就不接。
+
+        netlist 只含已接腳，所以「有任何一支缺」不能當錯誤——那會對每一顆
+        有未用通道的元件誤報。
+        """
         m = fixtures.buffer_model()
-        self.assertEqual(missing_pins(m, ["2", "18"]), ["1"])
+        self.assertEqual(missing_pins(m, ["2", "18"]), [],
+                         "部分腳未接是正常設計")
+        from ndd_models import unused_pins
+        self.assertEqual(unused_pins(m, ["2", "18"]), ["1"])
+
+    def test_model_on_a_completely_different_part_is_detected(self):
+        """完全沒有交集 = 模型套錯元件（或腳號格式不相容，如數字套到 BGA）。"""
+        m = fixtures.buffer_model()
+        self.assertTrue(missing_pins(m, ["A1", "B2", "C3"]))
 
     def test_same_pin_count_different_pinout_still_passes(self):
         """**必須誠實命名**：這是 pin-existence check，不是 package 驗證。"""
@@ -539,12 +552,35 @@ class TestBomAmbiguity(unittest.TestCase):
 
 
 class TestAssertionsUnderAmbiguity(unittest.TestCase):
-    def test_not_stuffed_fails_when_scope_insufficient(self):
+    def test_smt_part_absent_from_smt_bom_is_provable_dni(self):
+        """SMT BOM 本來就該列出所有 SMT 件，所以 SMT 件缺席**是有意義的**。"""
         from ndd_audit import run_assertion
         pj = fixtures.Project()
         nl = Netlist(fixtures.write_asc(pj.path("a.asc"), {"R1": "R_0402"},
                                         {"N1": [("R1", "1")]}))
         bom = Bom(fixtures.write_bom(pj.path("a.xlsx"), []), scope="smt_only")
+        ok, _a = run_assertion(
+            {"kind": "not_stuffed", "refdes": "R1"}, nl, bom, {})
+        self.assertTrue(ok)
+
+    def test_connector_absent_from_smt_bom_proves_nothing(self):
+        """連接器/手插件本來就不在 SMT BOM 範圍內，缺席不代表沒貼。"""
+        from ndd_audit import run_assertion
+        pj = fixtures.Project()
+        nl = Netlist(fixtures.write_asc(pj.path("a.asc"), {"J1": "Conn_XYZ"},
+                                        {"N1": [("J1", "1")]}))
+        bom = Bom(fixtures.write_bom(pj.path("a.xlsx"), []), scope="smt_only")
+        ok, actual = run_assertion(
+            {"kind": "not_stuffed", "refdes": "J1"}, nl, bom, {})
+        self.assertFalse(ok)
+        self.assertIn("bom-scope-insufficient", actual)
+
+    def test_variant_bom_can_never_prove_dni(self):
+        from ndd_audit import run_assertion
+        pj = fixtures.Project()
+        nl = Netlist(fixtures.write_asc(pj.path("a.asc"), {"R1": "R_0402"},
+                                        {"N1": [("R1", "1")]}))
+        bom = Bom(fixtures.write_bom(pj.path("a.xlsx"), []), scope="variant")
         ok, actual = run_assertion(
             {"kind": "not_stuffed", "refdes": "R1"}, nl, bom, {})
         self.assertFalse(ok)

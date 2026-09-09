@@ -374,22 +374,29 @@ def cmd_trace(args, pj):
                     mids.items(), key=lambda x: (x[0][1], x[0][2])):
                 sm = slot_rx.match(mrd)
                 slot = sm.group(1) if (sm and sm.groups()) else mrd
-                partners = fab.mate_partners(mb, mrd)
-                if not partners:
+                # ⚠️ 這一跳**就是**跨板對接本身。必須走 fab.mate（它才帶
+                #    已批准的對映與 mate caveat），不能只用 mate_partners 取
+                #    對手板然後沿用同一個 pin number —— 那等於：
+                #      (a) 忽略 mate_map 的批准對映（非直通時直接算錯）
+                #      (b) mate:unapproved 永遠不會出現在輸出裡（標了等於沒標）
+                crossings = fab.mate.get((mb, mrd, mpin), [])
+                if not crossings:
                     # ⚠️ 舊版在這裡 `continue`，整條訊號從 CSV 靜默消失。
                     rows.append(dict(
                         base, slot=slot, mid="%s.%s" % (mrd, mpin), far_pin="",
-                        far_net="(mate 未宣告)", n_loads=0, loads="", stops="",
+                        far_net="(mate 未宣告或該腳不在對映中)",
+                        n_loads=0, loads="", stops="",
                         hops=fab.hop_string(path), endpoint_kind="",
                         gating=fab.path_gating(path),
                         caveats=C.render(fab.path_caveats(path, ["mate:missing"])),
                         confidence=C.confidence_of(
                             fab.path_caveats(path, ["mate:missing"]))))
                     continue
-                for tb, trd in partners:
-                    ends = fab.trace((tb, trd, mpin), max_depth=6)
-                    fnet = fab.nl[tb].pin_net(trd, mpin)
-                    loads, stops, cav, gat, kinds = [], [], set(), [], set()
+                for (tb, trd, tpin), mcav in crossings:
+                    ends = fab.trace((tb, trd, tpin), max_depth=6)
+                    fnet = fab.nl[tb].pin_net(trd, tpin)
+                    loads, stops, gat, kinds = [], [], [], set()
+                    cav = set(mcav)          # 跨板那一跳的 caveat 要進來
                     for (eb, erd, ep_), (epath, ep) in sorted(ends.items()):
                         kind, reason, ecav = ep
                         tag = "%s.%s" % (erd, ep_)
@@ -404,7 +411,7 @@ def cmd_trace(args, pj):
                     gat.append(fab.path_gating(path))
                     rows.append(dict(
                         base, slot=slot, mid="%s.%s" % (mrd, mpin),
-                        far_pin="%s.%s" % (trd, mpin), far_net=fnet or "",
+                        far_pin="%s.%s" % (trd, tpin), far_net=fnet or "",
                         n_loads=len(loads), loads=" ".join(sorted(loads)),
                         stops=" ".join(sorted(stops)),
                         endpoint_kind=";".join(sorted(kinds)),
@@ -656,9 +663,10 @@ def cmd_coverage(args, pj):
             amb = is_ambiguous(pn)
             pn = "" if amb else (pn or "")
             key = pn or "(無 MPN)"
-            e = agg.setdefault(key, {"n": 0, "bom": "無", "scope": bom.scope,
+            e = agg.setdefault(key, {"n": 0, "bom": "無", "scope": set(),
                                      "state": set(), "todo": set()})
             e["n"] += 1
+            e["scope"].add(bom.scope)   # 同一料號可能跨多塊板，scope 不同
             if amb:
                 e["bom"] = "ambiguity"
                 e["todo"].add("BOM 衝突")
@@ -698,7 +706,7 @@ def cmd_coverage(args, pj):
     for pn in sorted(agg):
         e = agg[pn]
         print("%-28s %4d %-10s %-9s %-4s %-6d %-22s %s"
-              % (pn[:28], e["n"], e["bom"], e["scope"],
+              % (pn[:28], e["n"], e["bom"], ",".join(sorted(e["scope"])),
                  "有" if _ds_present(pn, have) else "無",
                  locked.get(pn.upper(), 0),
                  ",".join(sorted(e["state"]))[:22],
