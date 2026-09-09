@@ -131,9 +131,10 @@ def _validate(name, m):
 def load_models(project_dir=None):
     """載入專案 `models.json` 並強制驗證。
 
-    ⚠️ 本 skill **不內建 seed model**。初版帶的四個 seed 是 `pairs` schema、
-       在新規格下無法載入；而通用型 skill 不應把任何特定
-       料號當成預設知識。要用就在專案的 `models.json` 自行查證後加入。
+    ⚠️ **不自動載入任何範例。** `references/example-models.json` 有四顆可複製
+       的範例，用 `ndd.py models --add <名稱>` 放進專案。手動複製是刻意的：
+       模型是「某人對 datasheet 的解讀」，自動塞進每個專案等於讓你在不知情下
+       用別人的解讀去追訊號。複製之後它就是**你的宣告**。
     """
     models = {}
     if project_dir:

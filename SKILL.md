@@ -264,7 +264,20 @@ python ndd.py pinfn --list
 - `pin_roles` 記下 VSS/VDD 是哪幾支腳（成本趨近於零，卻是封裝判定的主要證據）
 - `gate`（通不通）與 `parameter_control`（通過後的性質）要分開
 - `always` 由 netlist 推導，不可手寫
-- **本 skill 不內建 seed model** —— 預先建模是把你的解讀凍結成永久資產
+- **範例模型在 `references/example-models.json`，但不會自動載入**：
+
+```bash
+python ndd.py models --examples        # 看有哪些
+python ndd.py models --add PCA9547     # 複製進專案的 models.json
+python ndd.py models --add all
+```
+
+  為什麼要手動複製：模型是「某人對 datasheet 的解讀」。自動塞進每個專案等於
+  讓你在不知情下用別人的解讀去追訊號。複製這個動作讓它變成**你的宣告**，
+  `audit` / `REVIEW.md` 才會把它列進你要複核的清單。
+
+  ⚠️ 範例的 `pin_roles` 全部留空、多數 `package` 也空著 —— 那些要翻 datasheet
+  才能填，**不要憑印象**。沒填也能用，只是封裝不會被 netlist 交叉驗證。
 
 ## Phase 4 — 驗證（先讀 `references/verification.md`）
 

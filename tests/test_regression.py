@@ -5,6 +5,8 @@
 每一條都對應 SPEC.md 裡一個**曾經會靜默出錯**的行為。全部使用合成 fixture，
 不依賴任何客戶專案檔案、私有 datasheet 或特定 refdes。
 """
+import io
+import json
 import os
 import sys
 import unittest
@@ -410,6 +412,50 @@ class TestModelSelection(unittest.TestCase):
         _n, edges, cav = transfer_for(models, "", "FAN_A", 20, None)
         self.assertEqual(cav, [])
         self.assertTrue(edges)
+
+
+class TestExampleModels(unittest.TestCase):
+    """範例模型必須能通過驗證，且**不得被自動載入**。"""
+
+    def _examples(self):
+        p = os.path.join(os.path.dirname(HERE), "references",
+                         "example-models.json")
+        raw = json.load(io.open(p, encoding="utf-8"))
+        return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+    def test_all_examples_validate(self):
+        from ndd_models import _validate
+        for k, m in self._examples().items():
+            _validate(k, dict(m))          # 不得拋例外
+
+    def test_examples_are_not_auto_loaded(self):
+        """模型是『某人對 datasheet 的解讀』，不能默默塞進每個專案。"""
+        pj = fixtures.Project()
+        self.assertEqual(load_models(pj.dir), {},
+                         "沒有 models.json 時就該是空的")
+
+    def test_unidirectional_examples_are_forward(self):
+        """初版用對稱 pairs，緩衝器與 fanout 會被反向走。"""
+        ex = self._examples()
+        for name in ("SN74HCS244", "PI49FCT3807"):
+            for e in ex[name]["transfer"]:
+                self.assertEqual(e["direction"], "forward", name)
+        for e in ex["SN74CBTLV3126"]["transfer"]:
+            self.assertEqual(e["direction"], "bidirectional",
+                             "FET switch 確實雙向")
+
+    def test_mux_edges_are_runtime_gated(self):
+        """I2C mux 的通道是軟體選通，不得被推成 always。"""
+        m = self._examples()["PCA9547"]
+        for e in m["transfer"]:
+            self.assertIn("channel_selected", e["gate"]["all_of"])
+        self.assertIn("channel_selected", m["runtime_conditions"])
+
+    def test_fanout_outputs_are_not_interconnected(self):
+        ex = self._examples()["PI49FCT3807"]
+        edges = transfer_edges(ex)
+        self.assertEqual(outgoing(edges, "3"), [],
+                         "兩個時脈輸出之間不得有路徑")
 
 
 class TestPinExistence(unittest.TestCase):

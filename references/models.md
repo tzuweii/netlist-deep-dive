@@ -1,8 +1,19 @@
 # 元件模型：transfer 邊、control、封裝判定
 
-模型檔是 `<專案>/models.json`。**本 skill 不內建 seed model**——通用型工具不應
-把特定料號當成預設知識，而且預先建模等於把「你對 datasheet 的解讀」凍結成看不
-見的永久資產。用到哪顆就自己查證後加哪顆。
+模型檔是 `<專案>/models.json`。
+
+`references/example-models.json` 有四顆可直接複製的範例（bus switch、buffer、
+clock fanout、I²C mux），但**不會自動載入**：
+
+```bash
+python ndd.py models --examples        # 看有哪些
+python ndd.py models --add PCA9547     # 複製進專案
+```
+
+手動複製是刻意的：模型是「某人對 datasheet 的解讀」，自動塞進每個專案等於讓你
+在不知情下用別人的解讀去追訊號——錯了會產生看起來完全合理、但整張表是錯的
+訊號鏈。複製之後它就是**你的宣告**，`audit` 與 `REVIEW.md` 才會把它列進你要
+負責複核的清單。
 
 ---
 

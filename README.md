@@ -91,6 +91,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `references/verification.md` | 三層驗證方法，以及**結構上驗不到**的四類 |
 | `references/datasheets.md` | datasheet 取得的實測限制 |
 | `references/example-ndd.json` | 去識別化的設定範例，逐欄註解 |
+| `references/example-models.json` | 可複製的元件模型範例（**不自動載入**） |
 | `scripts/ndd.py` | CLI 進入點 |
 | `scripts/ndd_pads.py` | netlist 解析 + 獨立邏輯的自我驗證 |
 | `scripts/ndd_bom.py` | BOM 解析、ambiguity、`bom_scope` |
@@ -102,8 +103,13 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `scripts/ndd_audit.py` | 宣告式斷言引擎 |
 | `tests/` | 合成 fixture 回歸測試 |
 
-**不內建任何 seed model。** 通用型工具不應把特定料號當成預設知識，而且預先建模
-等於把「你對 datasheet 的解讀」凍結成看不見的永久資產。用到哪顆就自己查證後加。
+**模型不會自動載入。** `references/example-models.json` 有四顆可直接複製的範例
+（bus switch / buffer / clock fanout / I²C mux），用 `ndd.py models --add <名稱>`
+放進專案。
+
+手動複製是刻意的：模型是「某人對 datasheet 的解讀」，自動塞進每個專案等於讓你
+在不知情下用別人的解讀去追訊號。複製之後它就是**你的宣告**，`audit` 與
+`REVIEW.md` 會把它列進你要複核的清單。
 
 ## 限制
 

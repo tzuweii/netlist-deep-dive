@@ -15,6 +15,8 @@
     python ndd.py datasheets                  # 盤點/下載 datasheet，產生 MISSING.md
     python ndd.py review                      # 產生人工複驗清單 REVIEW.md
     python ndd.py models                      # 列出已查證的元件模型
+    python ndd.py models --examples           # 看可複製的範例模型
+    python ndd.py models --add PCA9547        # 把範例複製進專案的 models.json
     python ndd.py manifest                    # 輸入檔完整 SHA-256 + 工具版本
     python ndd.py coverage                    # per-MPN 三源覆蓋狀況
     python ndd.py migrate <分析資料夾>        # 把 v0 的設定升級到 v1
@@ -1325,7 +1327,71 @@ def cmd_pinfn(args, pj):
                      package=declared or "", pick=args.pick)
 
 
+EXAMPLE_MODELS = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "references", "example-models.json")
+
+
+def _load_examples():
+    with io.open(EXAMPLE_MODELS, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
 def cmd_models(args, pj):
+    """列出專案模型；`--examples` 看範例、`--add` 複製進專案。
+
+    ⚠️ 範例**不會自動載入**。模型是「某人對 datasheet 的解讀」，自動塞進每個
+       專案等於讓你在不知情下用別人的解讀去追訊號。複製這個動作讓它變成
+       **你的宣告**，`audit` / `REVIEW.md` 才會把它列進你要複核的清單。
+    """
+    if args.examples:
+        ex = _load_examples()
+        print("可複製的範例模型（%s）：\n" % os.path.relpath(EXAMPLE_MODELS))
+        for k, m in sorted(ex.items()):
+            edges = sum(len(e["to"]) * len(e["from"]) for e in m["transfer"])
+            print("  %-16s %2d 條邊  package=%-12s %s"
+                  % (k, edges, m.get("package", "-") or "-",
+                     m.get("verified_against", "")))
+            print("       %s" % m.get("_basis", ""))
+        print("\n用 `ndd.py models --add <名稱|all>` 複製進專案的 models.json。")
+        return
+
+    if args.add:
+        ex = _load_examples()
+        want = sorted(ex) if args.add == ["all"] else args.add
+        bad = [w for w in want if w not in ex]
+        if bad:
+            raise SystemExit("沒有這些範例：%s（可用：%s）"
+                             % (", ".join(bad), ", ".join(sorted(ex))))
+        p = os.path.join(pj.dir, "models.json")
+        cur = {}
+        if os.path.exists(p):
+            with io.open(p, encoding="utf-8") as fh:
+                cur = json.load(fh)
+        added, skipped = [], []
+        for w in want:
+            if w in cur and not args.force:
+                skipped.append(w)
+                continue
+            cur[w] = ex[w]
+            added.append(w)
+        with io.open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(cur, indent=2, ensure_ascii=False))
+        print("寫出 %s" % p)
+        if added:
+            print("  加入：%s" % ", ".join(added))
+        if skipped:
+            print("  已存在（未覆蓋，要覆蓋加 --force）：%s" % ", ".join(skipped))
+        print("")
+        print("⚠️ 這些現在是**你的宣告**，請複核：")
+        print("   - `direction` 是否真的翻過 datasheet？單向元件不得雙向走。")
+        print("   - `package` 與 `pin_roles` 留空的要補 —— 沒有它，多封裝料號")
+        print("     的封裝不會被 netlist 交叉驗證。")
+        print("   - 相近型號（-Q1／不同封裝）的腳位常常不同，不要照抄。")
+        print("")
+        print("跑 `ndd.py audit` 看模型檢查結果。")
+        return
+
     print(describe(pj.models))
 
 
@@ -1358,7 +1424,11 @@ def main(argv=None):
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
     p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--pick", type=int); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
-    p = sub.add_parser("models"); p.set_defaults(func=cmd_models)
+    p = sub.add_parser("models")
+    p.add_argument("--examples", action="store_true", help="列出可複製的範例模型")
+    p.add_argument("--add", nargs="+", metavar="名稱", help="把範例複製進專案（all = 全部）")
+    p.add_argument("--force", action="store_true", help="覆蓋同名模型")
+    p.set_defaults(func=cmd_models)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")

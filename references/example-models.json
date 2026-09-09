@@ -1,0 +1,112 @@
+{
+  "_說明": [
+    "可直接複製使用的範例模型。**本檔不會被自動載入** —— 用",
+    "`ndd.py models --add <名稱>` 複製進專案的 models.json，或自己貼過去。",
+    "",
+    "為什麼不自動載入：模型是『某人對 datasheet 的解讀』。自動塞進每個專案",
+    "等於讓你在不知情的狀況下用別人的解讀去追訊號 —— 錯了會產生看起來完全",
+    "合理、但整張表是錯的訊號鏈。複製這個動作讓它變成**你的宣告**，之後",
+    "`audit` / `REVIEW.md` 才會把它列進你要負責複核的清單。",
+    "",
+    "以下四顆是初版內建的模型，已改寫成有向 schema。頁碼與文件編號沿用初版",
+    "的查證紀錄；`direction` 依各元件的型別判定（見每顆的 _basis）。",
+    "",
+    "⚠️ **`pin_roles` 全部留空。** 它記的是 VSS/VDD 是哪幾支腳，是封裝判定的",
+    "   主要證據。要填請翻該顆 datasheet 的腳位表 —— **不要憑印象填**。",
+    "   沒填也能用（該料號只有一個模型時走 single_candidate），只是封裝不會",
+    "   被 netlist 交叉驗證。",
+    "",
+    "⚠️ 換料號前先確認腳位真的一樣。`-Q1`、不同封裝、相近型號的腳位常常不同。"
+  ],
+
+  "SN74CBTLV3126": {
+    "match": ["SN74CBTLV3126"],
+    "kind": "signal_transfer",
+    "package": "",
+    "pin_roles": {},
+    "verified_against": "sn74cbtlv3126.pdf p.3 Table 4-1（TI SCDS038N）",
+    "_basis": "FET bus switch —— 導通時 S/D 兩端直接相連，**確實雙向**。",
+    "_note": "OE 高態導通。OE 拉低時 S/D 高阻抗，且內部無輸入緩衝器，因此未使用通道的 S/D 懸空不會造成貫穿電流。",
+    "transfer": [
+      {"from": ["2"], "to": ["3"], "direction": "bidirectional", "gate": {"all_of": ["1"]}},
+      {"from": ["5"], "to": ["6"], "direction": "bidirectional", "gate": {"all_of": ["4"]}},
+      {"from": ["8"], "to": ["9"], "direction": "bidirectional", "gate": {"all_of": ["10"]}},
+      {"from": ["11"], "to": ["12"], "direction": "bidirectional", "gate": {"all_of": ["13"]}}
+    ],
+    "control": {
+      "1": {"type": "enable", "polarity": "high", "mechanism": "strap"},
+      "4": {"type": "enable", "polarity": "high", "mechanism": "strap"},
+      "10": {"type": "enable", "polarity": "high", "mechanism": "strap"},
+      "13": {"type": "enable", "polarity": "high", "mechanism": "strap"}
+    }
+  },
+
+  "SN74HCS244": {
+    "match": ["SN74HCS244"],
+    "kind": "signal_transfer",
+    "package": "",
+    "pin_roles": {},
+    "verified_against": "sn74hcs244-q1.pdf p.3 Pin Functions（TI SCLS821C）",
+    "_basis": "八路緩衝器 —— A 進 Y 出，**單向**。初版用對稱 pairs 描述，會讓走圖從 Y 逆走回 A。",
+    "_note": "兩個 bank 各四路。OE 為**低態**致能，接 GND = 永遠致能。",
+    "transfer": [
+      {"from": ["2"], "to": ["18"], "direction": "forward", "gate": {"all_of": ["1"]}},
+      {"from": ["4"], "to": ["16"], "direction": "forward", "gate": {"all_of": ["1"]}},
+      {"from": ["6"], "to": ["14"], "direction": "forward", "gate": {"all_of": ["1"]}},
+      {"from": ["8"], "to": ["12"], "direction": "forward", "gate": {"all_of": ["1"]}},
+      {"from": ["11"], "to": ["9"], "direction": "forward", "gate": {"all_of": ["19"]}},
+      {"from": ["13"], "to": ["7"], "direction": "forward", "gate": {"all_of": ["19"]}},
+      {"from": ["15"], "to": ["5"], "direction": "forward", "gate": {"all_of": ["19"]}},
+      {"from": ["17"], "to": ["3"], "direction": "forward", "gate": {"all_of": ["19"]}}
+    ],
+    "control": {
+      "1": {"type": "enable", "polarity": "low", "mechanism": "strap"},
+      "19": {"type": "enable", "polarity": "low", "mechanism": "strap"}
+    }
+  },
+
+  "PI49FCT3807": {
+    "match": ["PI49FCT3807"],
+    "kind": "signal_transfer",
+    "package": "",
+    "pin_roles": {},
+    "verified_against": "pi49fct3807.pdf p.2 Pin Description（Diodes DS43192 Rev 2-2）",
+    "_basis": "1-to-10 clock driver —— 輸入驅動十個輸出，**單向**，且**輸出之間沒有內部通路**。初版用對稱 pairs，走圖會走 B3->1->B7，在兩個時脈輸出之間憑空捏造一條不存在的路徑。",
+    "_note": "無致能腳。⚠️ 輸出腳號不連續（11 之後跳到 12），不要用等差級數推。",
+    "transfer": [
+      {"from": ["1"],
+       "to": ["3", "5", "7", "9", "11", "12", "14", "16", "18", "19"],
+       "direction": "forward"}
+    ],
+    "control": {}
+  },
+
+  "PCA9547": {
+    "match": ["PCA9547"],
+    "kind": "signal_transfer",
+    "package": "HVQFN24",
+    "pin_roles": {},
+    "verified_against": "PCA9547.pdf p.5 Table 3 HVQFN24 欄（NXP Rev.4）",
+    "_basis": "8 通道 I2C mux —— SDA/SCL 是**雙向**匯流排；通道由 runtime 寫暫存器選通，所以每條邊都由 `channel_selected` 把關，**不會被推成 always**。",
+    "_note": "追出來的是『軟體有可能打通的路徑』，不是同一瞬間的實際連線。⚠️ A0/A1/A2 在部分符號裡沒有命名，會被畫成一般電源/接地腳，看起來就像位址無從查起——實際上查 datasheet 腳位表就有。⚠️ `package` 已填 HVQFN24；若你的板子用 SO24，腳位不同，**不可沿用**。",
+    "transfer": [
+      {"from": ["20"], "to": ["1", "3", "5", "7", "10", "12", "14", "16"],
+       "direction": "bidirectional", "gate": {"all_of": ["channel_selected"]}},
+      {"from": ["19"], "to": ["2", "4", "6", "8", "11", "13", "15", "17"],
+       "direction": "bidirectional", "gate": {"all_of": ["channel_selected"]}}
+    ],
+    "control": {
+      "18": {"type": "address", "mechanism": "strap"},
+      "22": {"type": "address", "mechanism": "strap"},
+      "23": {"type": "address", "mechanism": "strap"},
+      "24": {"type": "reset", "polarity": "low", "mechanism": "strap"}
+    },
+    "runtime_conditions": {
+      "channel_selected": {
+        "kind": "runtime_register",
+        "verified_against": "PCA9547.pdf p.5 Table 3（NXP Rev.4）"
+      }
+    },
+    "addr": {"base": 112, "bits": {"18": 4, "23": 2, "22": 1}}
+  }
+}
