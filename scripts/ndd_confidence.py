@@ -31,6 +31,12 @@ GATING_ORDER = [ALWAYS, CONDITIONAL, UNKNOWN]
 # --- caveat -> confidence 上限 ----------------------------------------------
 # 每個 caveat 只能**降低**一條邊的證據品質，不能提高。新增 caveat 時務必在此
 # 登錄，否則它不會影響 confidence，等於標了卻沒有效果。
+#
+# ⚠️ **只放「這條路徑的證據有問題」的東西。** 端點還沒分類是**覆蓋率缺口**，
+#    不是路徑證據不足 —— 路徑本身由 netlist 完整支持，只是還不知道訊號到了
+#    終點之後會不會繼續走。把它算進 confidence 會讓 96% 的列都降級，那和
+#    「所有主張看起來一樣確定」是同一個毛病，只是反過來。
+#    端點分類狀態改由 `endpoint_kind` 欄與 `coverage` / `REVIEW.md` 呈現。
 CAVEAT_CEILING = {
     # 連接器：netlist 連得上即事實。排名定案就不掛 caveat；只有排名決定不了
     # 才是真的未知（見 ndd_graph._rank_decides）。
@@ -41,7 +47,6 @@ CAVEAT_CEILING = {
     "package:conflict":           UNKNOWN,
     "model:ambiguous":            UNKNOWN,
     "model:pin_absent":           UNKNOWN,
-    "endpoint:unclassified":      CAVEATED,
     "bom:ambiguous":              CAVEATED,
     "bom_scope:insufficient":     CAVEATED,
 }

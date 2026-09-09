@@ -456,7 +456,10 @@ class TestEndpoints(unittest.TestCase):
         fab = self._board()
         kind, _reason, cav = fab.endpoint_of(("a", "U2", "1"))
         self.assertEqual(kind, EP_UNCLASSIFIED)
-        self.assertIn("endpoint:unclassified", cav)
+        self.assertEqual(cav, [], "未分類是覆蓋率缺口，不是路徑證據不足")
+        import ndd_confidence
+        self.assertNotIn("endpoint:unclassified", ndd_confidence.CAVEAT_CEILING,
+                         "不得讓它降級 confidence —— 會有 96% 的列一起降級")
 
     def test_declared_unknown_stop_is_not_a_load(self):
         fab = self._board(endpoints={"ADC_A": "unknown_stop"})

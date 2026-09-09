@@ -92,7 +92,7 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 | `gating: always` | **不寫**——這是預設，沒有條件才是常態 |
 | `gating: conditional` | 「這條路要**軟體選通**才通」（並說是哪顆、什麼機制） |
 | `gating: unknown` | 「致能腳懸空／由誰驅動不明，**通不通我沒把握**」 |
-| `endpoint:unclassified` | 「訊號停在這裡，但我**沒查**這幾顆的腳位功能」 |
+| `endpoint_kind: unclassified` | 「訊號停在這裡，但這幾顆**還沒分類**——可能是終點，也可能是還沒建模的穿越件」。**這是覆蓋率缺口，不是路徑有疑問**，別講成路徑不可信 |
 | `driver(model)` | 「這是訊號**來源**，不是負載」 |
 | `mate:ambiguous` | 「這個接頭的腳位對應，我從 netlist **判不出來**」 |
 | `mate:inferred` / `package:inferred` | 「這是我**推的**，依據是⋯」（寫出依據，別寫狀態名） |

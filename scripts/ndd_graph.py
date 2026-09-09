@@ -466,8 +466,11 @@ class Fabric(object):
             return EP_UNKNOWN_DECLARED, "declared", []
         # ⚠️ 預設 unclassified**必須**保留在輸出裡。若把未宣告的一律當
         #    unknown_stop 排除，絕大多數真實終端負載會在被宣告前全部消失，
-        #    trace 的主要產出就報廢了。列存在保住可用性，caveat 保住誠實。
-        return EP_UNCLASSIFIED, "undeclared", ["endpoint:unclassified"]
+        #    trace 的主要產出就報廢了。
+        #
+        # 但它**不掛 caveat**：這是覆蓋率缺口，不是路徑證據不足。狀態由
+        # `endpoint_kind` 欄呈現，待辦由 coverage / REVIEW.md 列出。
+        return EP_UNCLASSIFIED, "undeclared", []
 
     def trace(self, start, stop_fn=None, max_depth=16):
         """BFS。caveats 與 gating 沿路徑累積 —— 標記不傳遞等於沒標。
