@@ -127,5 +127,53 @@ class TestInitRun(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(d, "SETUP.md")))
 
 
+class TestMigrate(unittest.TestCase):
+    """v0 專案設定升級。**只改設定，不動原始檔。**"""
+
+    def _v0_project(self):
+        d = _folder(two_boards=False)
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        p = os.path.join(d, "ndd.json")
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        for b in cfg["boards"].values():          # 退回 v0 格式
+            b["bom_kind"] = "SMT BOM（不含手插件）"
+            for f in ("bom_scope", "sheet", "expand_ranges"):
+                b.pop(f, None)
+        for f in ("mate_map", "part_package", "endpoints"):
+            cfg.pop(f, None)
+        io.open(p, "w", encoding="utf-8").write(
+            json.dumps(cfg, ensure_ascii=False, indent=2))
+        return d, p
+
+    def test_v0_config_is_rejected_before_migrating(self):
+        d, p = self._v0_project()
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["--config", p, "audit"])
+        self.assertIn("bom_kind", str(cm.exception))
+
+    def test_migrate_maps_scope_and_backs_up(self):
+        d, p = self._v0_project()
+        self.assertEqual(ndd.main(["migrate", d]), 0)
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        b = list(cfg["boards"].values())[0]
+        self.assertEqual(b["bom_scope"], "smt_only", "含 SMT 字樣要對到 smt_only")
+        self.assertNotIn("bom_kind", b)
+        for f in ("mate_map", "part_package", "endpoints"):
+            self.assertIn(f, cfg)
+        self.assertTrue(os.path.exists(p + ".v0.bak"), "原檔要備份")
+
+    def test_migrate_is_idempotent(self):
+        d, p = self._v0_project()
+        ndd.main(["migrate", d])
+        before = io.open(p, encoding="utf-8").read()
+        ndd.main(["migrate", d])
+        self.assertEqual(io.open(p, encoding="utf-8").read(), before)
+
+    def test_audit_runs_after_migrate(self):
+        d, p = self._v0_project()
+        ndd.main(["migrate", d])
+        self.assertEqual(ndd.main(["--config", p, "audit"]), 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

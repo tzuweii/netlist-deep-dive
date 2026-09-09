@@ -17,6 +17,7 @@
     python ndd.py models                      # 列出已查證的元件模型
     python ndd.py manifest                    # 輸入檔完整 SHA-256 + 工具版本
     python ndd.py coverage                    # per-MPN 三源覆蓋狀況
+    python ndd.py migrate <分析資料夾>        # 把 v0 的設定升級到 v1
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
 
@@ -31,6 +32,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -925,6 +927,108 @@ def cmd_datasheets(args, pj):
     print("\n缺 %d 筆，已寫出 %s" % (len(missing), mp))
 
 
+# ----------------------------------------------------------------- migrate --
+BOM_KIND_MAP = [(r"SMT", "smt_only")]           # 其餘一律 complete
+
+
+def cmd_migrate(args):
+    """把 v0 建立的專案設定升級到 v1。**只改設定，不動任何原始檔。**
+
+    會做的：
+      - `bom_kind` -> `bom_scope`（含 SMT 字樣 -> smt_only，其餘 complete）
+      - 補上缺少的空殼欄位（mate_map / part_package / endpoints）
+      - 原檔備份成 `ndd.json.v0.bak`
+
+    **不會做的**（刻意）：
+      - 不把 models.json 的 `pairs` 自動轉成 `transfer` —— 舊 schema 沒有方向
+        資訊，機械轉換只會把「單向元件可雙向走」這個錯誤帶進新 schema。
+      - 不清掉舊的 pinfn 快取 —— 原文還有用，只是會被標成待重新確認。
+    """
+    cfg_path = args.config or find_config(args.dir or os.getcwd())
+    d = os.path.dirname(cfg_path)
+    with io.open(cfg_path, encoding="utf-8") as fh:
+        cfg = json.load(fh)
+
+    changed = []
+    for k, b in (cfg.get("boards") or {}).items():
+        if "bom_kind" in b and "bom_scope" not in b:
+            old = b.pop("bom_kind") or ""
+            scope = "complete"
+            for pat, val in BOM_KIND_MAP:
+                if re.search(pat, old, re.I):
+                    scope = val
+                    break
+            b["bom_scope"] = scope
+            changed.append("boards.%s: bom_kind %r -> bom_scope %r"
+                           % (k, old[:30], scope))
+        for f, default in (("sheet", None), ("ref_col", None),
+                           ("expand_ranges", False)):
+            if f not in b:
+                b[f] = default
+                changed.append("boards.%s: 補上 %s" % (k, f))
+    for f in ("mate_map", "part_package", "endpoints"):
+        if f not in cfg:
+            cfg[f] = {}
+            changed.append("補上 %s（空殼）" % f)
+
+    if changed:
+        bak = cfg_path + ".v0.bak"
+        if not os.path.exists(bak):
+            shutil.copy2(cfg_path, bak)
+        with io.open(cfg_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(cfg, indent=2, ensure_ascii=False))
+        print("已更新 %s（原檔備份為 %s）" % (cfg_path, os.path.basename(bak)))
+        for c in changed:
+            print("   %s" % c)
+    else:
+        print("設定已是 v1 格式，無需變更。")
+
+    print("")
+    todo = []
+    mp = os.path.join(d, "models.json")
+    if os.path.exists(mp):
+        try:
+            raw = json.load(io.open(mp, encoding="utf-8"))
+        except Exception as exc:
+            raw = {}
+            print("!! models.json 讀取失敗：%s" % exc)
+        legacy = [k for k, v in raw.items() if isinstance(v, dict) and "pairs" in v]
+        if legacy:
+            todo.append(
+                "models.json 有 %d 個模型仍是舊的 `pairs` schema：%s\n"
+                "     **不要機械轉換** —— 舊 schema 沒有方向資訊，照抄會把"
+                "「單向元件可雙向走」的錯誤帶進新 schema。\n"
+                "     請重翻 datasheet 補 `direction`（forward / bidirectional）、"
+                "`pin_roles`（VSS/VDD 腳號）、結構化的 `control`。\n"
+                "     schema 見 references/models.md。"
+                % (len(legacy), ", ".join(legacy[:6])))
+    else:
+        todo.append(
+            "沒有 models.json。v0 內建的 4 個腳位模型（bus switch / buffer /\n"
+            "     clock fanout / I2C mux）**已移除** —— 通用型工具不該把特定料號\n"
+            "     當成預設知識。若你的追跡或 i2c_addr 斷言依賴它們，請自行查證後\n"
+            "     建立專案的 models.json（見 references/models.md）。")
+
+    _cp, rows, mig = ndd_pinfn.load_cache(d)
+    if mig:
+        todo.append(
+            "verified-pins.csv 有 %d 列是舊格式（缺 package 欄）。原文還在可以讀，\n"
+            "     但**不會被當成已解析的快取使用** —— 舊列若被當成有效，等於把\n"
+            "     未鎖定封裝的資料洗成合法覆蓋。需要哪支腳就重跑 pinfn。" % mig)
+
+    todo.append(
+        "衍生產物請刪掉重跑：`export/`、`REVIEW.md`。欄位已變動\n"
+        "     （signal_chain.csv 新增 caveats/confidence/endpoint_kind，\n"
+        "     loads 欄不再含驅動端）。")
+
+    print("接下來：")
+    for i, t in enumerate(todo, start=1):
+        print("  %d. %s" % (i, t))
+    print("")
+    print("都處理完後跑：ndd.py audit  ->  ndd.py review")
+    return changed
+
+
 # ---------------------------------------------------------------- manifest --
 def cmd_manifest(args, pj):
     """輸入檔的完整 SHA-256 + 工具版本。
@@ -1257,6 +1361,8 @@ def main(argv=None):
     p = sub.add_parser("models"); p.set_defaults(func=cmd_models)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
+    p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")
+    p.set_defaults(func=cmd_migrate, noproj=True)
 
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
