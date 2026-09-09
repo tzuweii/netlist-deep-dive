@@ -18,7 +18,7 @@ import ndd_confidence as C                                     # noqa: E402
 import ndd_pinfn                                               # noqa: E402
 from ndd_bom import Bom, is_ambiguous                          # noqa: E402
 from ndd_graph import (EP_UNCLASSIFIED, EP_UNKNOWN_DECLARED,   # noqa: E402
-                       EP_UNKNOWN_UNUSABLE, Fabric)
+                       EP_UNKNOWN_UNUSABLE, Fabric, MateMapError)
 from ndd_models import (ModelError, derive_gating, load_models,  # noqa: E402
                         missing_pins, outgoing, select_model,
                         transfer_edges, transfer_for)
@@ -123,6 +123,33 @@ class TestMateApproval(unittest.TestCase):
         fab = _fab(pj)
         self.assertEqual(fab.mate.get(("a", "J1", "1"))[0][1], [])
         self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "approved")
+
+    def test_non_injective_map_is_rejected(self):
+        """兩個 A 腳映到同一個 B 腳會**靜默合併兩條 net** —— 載入時就要擋。"""
+        pj = self._two_boards()
+        pj.cfg["mate_map"] = {"a:J1|b:J2": {
+            "approved": {"1": "1", "2": "1"}, "evidence": "synthetic",
+            "confidence": "confirmed"}}
+        with self.assertRaises(MateMapError) as cm:
+            _fab(pj)
+        self.assertIn("單射", str(cm.exception))
+
+    def test_map_to_nonexistent_pin_is_rejected(self):
+        pj = self._two_boards()
+        pj.cfg["mate_map"] = {"a:J1|b:J2": {
+            "approved": {"1": "1", "2": "99"}, "evidence": "synthetic",
+            "confidence": "confirmed"}}
+        with self.assertRaises(MateMapError):
+            _fab(pj)
+
+    def test_incomplete_map_is_rejected(self):
+        """未涵蓋的腳必須明確處理，工具不替使用者假設。"""
+        pj = self._two_boards()
+        pj.cfg["mate_map"] = {"a:J1|b:J2": {
+            "approved": {"1": "1"}, "evidence": "synthetic",
+            "confidence": "confirmed"}}
+        with self.assertRaises(MateMapError):
+            _fab(pj)
 
     def test_approved_map_is_used_not_same_pin(self):
         """批准的對映若不是直通，走圖必須照批准走。"""

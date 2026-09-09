@@ -879,18 +879,24 @@ def main(argv=None):
     if getattr(args, "noproj", False):
         args.func(args)
         return 0
-    # 遷移類錯誤要給乾淨、可行動的訊息，不要丟 traceback 給使用者
+    # 遷移類與設定類錯誤要給乾淨、可行動的訊息，不要丟 traceback 給使用者。
+    # ⚠️ 要包住整個子命令，不能只包 Project() —— MateMapError 是在 fabric()
+    #    才拋出的，只包建構子會讓它以 traceback 逸出。
     try:
         pj = Project(args.config or find_config())
+        args.func(args, pj)
     except ModelError as exc:
         print("!! models.json 載入失敗：")
+        print(exc)
+        return 2
+    except ndd_graph.MateMapError as exc:
+        print("!! mate_map 驗證失敗（已批准的對映本身有問題，先修它）：")
         print(exc)
         return 2
     except ValueError as exc:
         print("!! 設定或 BOM 載入失敗：")
         print(exc)
         return 2
-    args.func(args, pj)
     return 0
 
 

@@ -56,7 +56,7 @@
 | 失敗／未解狀態 | 浮現位置 | 效果 |
 |---|---|---|
 | parser selfcheck 不一致 | `audit` [0] | FAIL，且不得繼續宣稱下游有效 |
-| `mate_map` 不完整／非單射／pin 不存在 | 載入時 | 直接拒絕載入 |
+| `mate_map` 不完整／非單射／pin 不存在 | `Fabric` 建構時（`mate`／`trace`／`review`） | 直接拒絕，CLI 印乾淨訊息並回傳 exit 2 |
 | 未批准 mate | `mate`、`trace`、`signal_chain.csv` | caveat + confidence 降級 |
 | model `pin_absent` | `audit` | FAIL |
 | model 多重 match／同分 | 載入時 | 直接拒絕載入 |

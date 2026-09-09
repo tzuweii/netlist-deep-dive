@@ -43,6 +43,10 @@ EP_UNCLASSIFIED = "unclassified"
 # 進 loads 的端點種類：unknown_stop 不算，因為它是「停在具名位置」不是負載。
 EP_IN_LOADS = (EP_TERMINAL, EP_STATEFUL, EP_UNCLASSIFIED)
 
+class MateMapError(Exception):
+    """已批准的對接對映本身有問題 —— 載入時就要擋，不能等到走圖。"""
+
+
 _BLOCKING = {"package:unresolved": "package_unresolved",
              "package:conflict": "package_conflict",
              "model:ambiguous": "model_ambiguous",
@@ -80,16 +84,52 @@ class Fabric(object):
             return m, True
         return None, False
 
+    @staticmethod
+    def _validate_map(key, amap, pa, pb):
+        """已批准的對映必須先被驗證，否則「批准」只是把錯誤升級成結論。
+
+        ⚠️ **單射檢查最重要**：兩個 A 腳映到同一個 B 腳會**靜默合併兩條 net**，
+           而合併後的圖看起來完全正常。這是所有 mapping 錯誤裡後果最大的一種。
+        """
+        errs = []
+        missing_a = [p for p in amap if p not in pa]
+        missing_b = [q for q in amap.values() if q not in pb]
+        if missing_a:
+            errs.append("A 側不存在的 pin：%s" % ", ".join(sorted(missing_a)[:8]))
+        if missing_b:
+            errs.append("B 側不存在的 pin：%s" % ", ".join(sorted(missing_b)[:8]))
+        seen = {}
+        dup = []
+        for p, q in amap.items():
+            if q in seen:
+                dup.append("%s 與 %s 都映到 %s" % (seen[q], p, q))
+            seen[q] = p
+        if dup:
+            errs.append("非單射（會靜默合併 net）：%s" % "；".join(dup[:5]))
+        uncovered_a = [p for p in pa if p not in amap]
+        if uncovered_a:
+            errs.append("A 側未涵蓋的 pin：%s" % ", ".join(sorted(uncovered_a)[:8]))
+        if errs:
+            raise MateMapError(
+                "mate_map `%s` 驗證失敗：\n  - %s\n"
+                "  （未涵蓋的腳若確實不對接，請在 approved 裡明確省略並於 "
+                "evidence 說明；工具不會替你假設。）" % (key, "\n  - ".join(errs)))
+        uncovered_b = [q for q in pb if q not in set(amap.values())]
+        return uncovered_b
+
     def _build_mates(self):
         self.mate = {}
         self.mate_status = {}
+        self.mate_uncovered = {}
         for ba, ra, bb, rb in self.mates:
             spec, rev = self._approved(ba, ra, bb, rb)
             pa, pb = self.nl[ba].pins(ra), self.nl[bb].pins(rb)
             if spec:
-                amap = dict(spec["approved"])
+                amap = {str(k): str(v) for k, v in spec["approved"].items()}
                 if rev:
                     amap = {v: k for k, v in amap.items()}
+                key = self.mate_key(ba, ra, bb, rb)
+                self.mate_uncovered[key] = self._validate_map(key, amap, pa, pb)
                 pairs = [(p, q) for p, q in amap.items()]
                 cav = []
                 self.mate_status[(ba, ra, bb, rb)] = "approved"
