@@ -192,6 +192,51 @@ class TestMigrate(unittest.TestCase):
         ndd.main(["migrate", d])
         self.assertEqual(ndd.main(["--config", p, "audit"]), 0)
 
+    def test_migrate_run_completes_and_reports(self):
+        """一個指令把 v0 專案升到 v1 並跑完所有流程。"""
+        d, p = self._v0_project()
+        self.assertEqual(ndd.main(["migrate", d, "--run"]), 0)
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("升級報告", txt)
+        for sec in ("設定變更", "還原的元件模型", "重新產生的衍生產物",
+                    "流程執行結果", "需要你處理的"):
+            self.assertIn(sec, txt)
+        for f in ("MANIFEST.md", "REVIEW.md"):
+            self.assertTrue(os.path.exists(os.path.join(d, f)), f)
+
+    def test_migrate_run_regenerates_stale_outputs(self):
+        """舊的 export/ 欄位已變動，不能沿用。"""
+        d, p = self._v0_project()
+        os.makedirs(os.path.join(d, "export"), exist_ok=True)
+        stale = os.path.join(d, "export", "pinmap_old.csv")
+        io.open(stale, "w", encoding="utf-8").write("stale")
+        ndd.main(["migrate", d, "--run"])
+        self.assertFalse(os.path.exists(stale), "舊產物要被清掉")
+
+    def test_migrate_run_refuses_legacy_pairs_models(self):
+        """手寫的舊模型**不做自動轉換** —— 沒有方向資訊，轉了就是把錯誤帶進來。"""
+        d, p = self._v0_project()
+        io.open(os.path.join(d, "models.json"), "w", encoding="utf-8").write(
+            json.dumps({"OLD": {"match": ["XYZ"], "pairs": [["1", "2"]],
+                                "verified_against": "x"}}, ensure_ascii=False))
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["migrate", d, "--run"])
+        self.assertIn("pairs", str(cm.exception))
+
+    def test_migrate_only_restores_models_the_project_uses(self):
+        """全部塞進去會在使用者的檔案裡留下一堆用不到的宣告。"""
+        d, p = self._v0_project()
+        ndd.main(["migrate", d, "--run"])
+        mp = os.path.join(d, "models.json")
+        got = json.load(io.open(mp, encoding="utf-8")) if os.path.exists(mp) else {}
+        self.assertNotIn("PCA9547", got, "合成專案沒用到就不該加入")
+
+    def test_no_models_flag_skips_restore(self):
+        d, p = self._v0_project()
+        ndd.main(["migrate", d, "--run", "--no-models"])
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("--no-models", txt)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

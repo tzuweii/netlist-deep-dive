@@ -46,8 +46,12 @@ python ndd.py trace         # signal_chain.csv + topology_hint.csv
 python ndd.py pinfn --board a --refdes U939 15   # 由工具鎖定三源查腳位
 python ndd.py datasheets    # 盤點/下載 datasheet
 python ndd.py manifest      # 輸入檔完整 SHA-256 + 工具版本
+python ndd.py blockers      # 訊號鏈停在哪些料號上（建模投報率）
 python ndd.py review        # 產出人工複驗清單 REVIEW.md
 ```
+
+**從 v0 升級**：`python ndd.py migrate "C:/path/to/analysis" --run` —— 一個指令
+升級設定、還原原本內建的模型、重跑所有流程，並產出升級報告。
 
 設定檔逐欄說明見 `references/example-ndd.json`。
 

@@ -20,7 +20,7 @@
     python ndd.py manifest                    # 輸入檔完整 SHA-256 + 工具版本
     python ndd.py coverage                    # per-MPN 三源覆蓋狀況
     python ndd.py blockers                    # 訊號鏈停在哪些料號上（建模投報率）
-    python ndd.py migrate <分析資料夾>        # 把 v0 的設定升級到 v1
+    python ndd.py migrate <分析資料夾> --run  # v0 專案一鍵升級並跑完所有流程
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
 
@@ -339,6 +339,14 @@ def _plan(d):
     return rows, acc, amb, rej, skipped
 
 
+def _cmd_args(**kw):
+    """給流程執行器用的子命令參數。⚠️ 用 update，不要把同名鍵當關鍵字傳兩次。"""
+    base = dict(board="all", outdir="export", limit=40, signal=None,
+                pn=None, url=None, no_download=False)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
 def _run_step(name, fn, results):
     """跑一個步驟。**失敗不中止整條流程**，記錄下來寫進 SETUP.md。"""
     print("\n" + "=" * 78)
@@ -463,11 +471,7 @@ def cmd_init(args):
     # ---- 一路跑完，中間不再詢問 ----
     pj = Project(p)
     results = []
-    def A(**kw):
-        base = dict(board="all", outdir="export", limit=40, signal=None,
-                    pn=None, url=None, no_download=False)
-        base.update(kw)                 # ⚠️ 用 update，不要當關鍵字傳兩次
-        return argparse.Namespace(**base)
+    A = _cmd_args
 
     _run_step("export —— 逐腳事實表", lambda: cmd_export(A(), pj), results)
     if not args.no_datasheets:
@@ -942,6 +946,87 @@ def cmd_datasheets(args, pj):
 BOM_KIND_MAP = [(r"SMT", "smt_only")]           # 其餘一律 complete
 
 
+UPGRADE_TMPL = u"""# 升級報告（v0 -> v1）
+
+> 由 `ndd.py migrate --run` 產生於 {date}。原設定備份為 `ndd.json.v0.bak`。
+
+## 1. 設定變更
+
+{changes}
+
+## 2. 還原的元件模型
+
+v0 把這些模型**內建自動載入**；v1 不再自動載入，所以升級時把**這個專案實際
+用得到的**寫進你的 `models.json`。它們現在是**你的宣告**，`audit` 與
+`REVIEW.md` 會把它們列進你要複核的清單。
+
+{models}
+
+⚠️ **仍需你複核**：`direction` 是依元件型別判定的，`pin_roles` 全部留空
+（那要翻 datasheet 的腳位表才能填，不憑印象代填）。
+
+## 3. 重新產生的衍生產物
+
+欄位已變動（`signal_chain.csv` 新增 `caveats` / `confidence` /
+`endpoint_kind`，`loads` 欄不再含驅動端），舊的無法沿用：
+
+{regenerated}
+
+## 4. 流程執行結果
+
+{steps}
+
+## 5. 需要你處理的
+
+{todo}
+
+---
+
+逐腳查詢用 `ndd.py pins/net/part`，不要靠本文。
+"""
+
+
+def _project_mpns(pj):
+    """專案實際用到的主動料號。"""
+    out = set()
+    for k in pj.board_keys("all"):
+        nl, bom = pj.load(k)
+        for rd in nl.actives():
+            p = bom.pn(rd)
+            if isinstance(p, str) and p:
+                out.add(p)
+    return out
+
+
+def _restore_v0_models(pj):
+    """把 v0 內建、且**這個專案用得到**的模型寫進 models.json。
+
+    ⚠️ 只合併不覆蓋 —— 同名一律跳過，不動使用者已經寫好的東西。
+    ⚠️ 只加用得到的 —— 全部塞進去會在使用者的檔案裡留下一堆用不到的宣告。
+    """
+    from ndd_models import mpn_matches
+    ex = _load_examples()
+    pns = _project_mpns(pj)
+    want = {k: m for k, m in ex.items()
+            if any(mpn_matches(t, p) for t in m.get("match", []) for p in pns)}
+    p = os.path.join(pj.dir, "models.json")
+    cur = {}
+    if os.path.exists(p):
+        with io.open(p, encoding="utf-8") as fh:
+            cur = json.load(fh)
+    added, skipped = [], []
+    for k, m in sorted(want.items()):
+        if k in cur:
+            skipped.append(k)
+            continue
+        cur[k] = m
+        added.append(k)
+    if added:
+        with io.open(p, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(cur, indent=2, ensure_ascii=False))
+    return added, skipped, sorted(set(ex) - set(want))
+
+
 def cmd_migrate(args):
     """把 v0 建立的專案設定升級到 v1。**只改設定，不動任何原始檔。**
 
@@ -996,6 +1081,7 @@ def cmd_migrate(args):
 
     print("")
     todo = []
+    legacy_pairs = []
     mp = os.path.join(d, "models.json")
     if os.path.exists(mp):
         try:
@@ -1004,6 +1090,7 @@ def cmd_migrate(args):
             raw = {}
             print("!! models.json 讀取失敗：%s" % exc)
         legacy = [k for k, v in raw.items() if isinstance(v, dict) and "pairs" in v]
+        legacy_pairs = legacy
         if legacy:
             todo.append(
                 "models.json 有 %d 個模型仍是舊的 `pairs` schema：%s\n"
@@ -1032,11 +1119,99 @@ def cmd_migrate(args):
         "     （signal_chain.csv 新增 caveats/confidence/endpoint_kind，\n"
         "     loads 欄不再含驅動端）。")
 
-    print("接下來：")
-    for i, t in enumerate(todo, start=1):
-        print("  %d. %s" % (i, t))
+    if not args.run:
+        print("接下來：")
+        for i, t in enumerate(todo, start=1):
+            print("  %d. %s" % (i, t))
+        print("")
+        print("要一路跑完請加 --run。")
+        return changed
+
+    # ---- --run：一路跑完 ----
+    if legacy_pairs:
+        raise SystemExit(
+            "models.json 還有 %d 個舊的 `pairs` 模型：%s\n"
+            "  **不做自動轉換** —— 舊 schema 沒有方向資訊，機械轉成 transfer\n"
+            "  只會把「單向元件可雙向走」的錯誤帶進新 schema，而那正是這次要\n"
+            "  修的東西。請重翻 datasheet 改寫（見 references/models.md），\n"
+            "  改完再跑一次 migrate --run。"
+            % (len(legacy_pairs), ", ".join(legacy_pairs[:6])))
+
+    import datetime
+    pj = Project(cfg_path)
+    added, skipped, unused = ([], [], [])
+    if not args.no_models:
+        added, skipped, unused = _restore_v0_models(pj)
+        if added or skipped:
+            print("還原 v0 內建模型 -> models.json")
+            if added:
+                print("   加入：%s" % ", ".join(added))
+            if skipped:
+                print("   已存在，未覆蓋：%s" % ", ".join(skipped))
+            if unused:
+                print("   （%s 這個專案沒用到，未加入）" % ", ".join(unused))
+            pj = Project(cfg_path)          # 重新載入以吃到新模型
+            print("")
+
+    regen = []
+    exp = os.path.join(d, "export")
+    if os.path.isdir(exp):
+        shutil.rmtree(exp)
+        regen.append("`export/`（欄位已變動）")
+    for f in ("REVIEW.md", "MANIFEST.md"):
+        fp = os.path.join(d, f)
+        if os.path.exists(fp):
+            os.remove(fp)
+            regen.append("`%s`" % f)
+
+    results = []
+    A = _cmd_args
+    _run_step("export —— 逐腳事實表", lambda: cmd_export(A(), pj), results)
+    _run_step("datasheets —— %s" % ("盤點與下載" if args.datasheets else "只盤點不下載"),
+              lambda: cmd_datasheets(A(no_download=not args.datasheets), pj), results)
+    stats = _run_step("audit —— 一致性稽核",
+                      lambda: run_audit(pj.cfg, pj.all_boards("all"), pj.models), results)
+    _run_step("mate —— 連接器對接排名", lambda: cmd_mate(A(), pj), results)
+    _run_step("trace —— 端到端訊號鏈", lambda: cmd_trace(A(), pj), results)
+    _run_step("coverage —— per-MPN 三源覆蓋", lambda: cmd_coverage(A(), pj), results)
+    blockers = _run_step("blockers —— 建模投報率排名",
+                         lambda: cmd_blockers(A(), pj), results)
+    _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
+    _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
+
+    run_todo = []
+    if blockers:
+        top = sorted(blockers.items(), key=lambda x: -x[1]["chains"])[:3]
+        run_todo.append("- [ ] **訊號鏈停在這幾顆上**：%s\n"
+                        "        跑 `ndd.py blockers` 看完整排名。"
+                        % "、".join("`%s`（%d 條）" % (p, e["chains"]) for p, e in top))
+    if added:
+        run_todo.append("- [ ] **複核還原的模型**：`direction` 是否真的翻過 datasheet？"
+                        "`pin_roles` 留空的要補（多封裝料號沒有它就無法用 netlist "
+                        "交叉驗證封裝）")
+    if stats and stats.get("model_pending"):
+        run_todo.append("- [ ] **%d 項封裝待指定** —— 見 audit [1.5] 段"
+                        % len(stats["model_pending"]))
+    run_todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載"
+                    "填進 `ndd.json` 的 `endpoints`（不需要 datasheet）")
+    run_todo.append("- [ ] **舊的 pinfn 快取** —— 標為待重新確認，需要哪支腳就重跑")
+
+    txt = UPGRADE_TMPL.format(
+        date=datetime.date.today().isoformat(),
+        changes="\n".join("- %s" % c for c in changed) or "- （設定已是 v1 格式）",
+        models=("\n".join("- `%s`" % k for k in added) or "- （沒有用得到的，或你選了 --no-models）")
+               + ("\n\n未加入（這個專案沒用到）：%s" % "、".join(unused) if unused else ""),
+        regenerated="\n".join("- %s" % r for r in regen) or "- （無）",
+        steps="\n".join("- %-28s %s%s" % (n, st, "　—— " + why[:60] if why else "")
+                         for n, st, why in results),
+        todo="\n".join(run_todo))
+    sp = os.path.join(d, "SETUP.md")
+    with io.open(sp, "w", encoding="utf-8") as fh:
+        fh.write(txt)
     print("")
-    print("都處理完後跑：ndd.py audit  ->  ndd.py review")
+    print("=" * 78)
+    print("寫出 %s" % sp)
+    print("升級完成。可以開始問電路問題了。")
     return changed
 
 
@@ -1516,6 +1691,9 @@ def main(argv=None):
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)
     p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")
+    p.add_argument("--run", action="store_true", help="升級設定後一路跑完所有流程")
+    p.add_argument("--no-models", action="store_true", help="不還原 v0 的內建模型")
+    p.add_argument("--datasheets", action="store_true", help="順便嘗試下載 datasheet")
     p.set_defaults(func=cmd_migrate, noproj=True)
 
     args = ap.parse_args(argv)

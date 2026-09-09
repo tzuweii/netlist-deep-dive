@@ -272,61 +272,47 @@ v0 的 `tests/` 不存在，而 README 的賣點是「把驗證本身也工具�
 且 `loads` 欄語意改變；`pinmap_<board>.csv` 新增 `bom_scope`、`stuffed` 新增
 `UNKNOWN` / `AMBIGUOUS`；新增 `topology_hint.csv`。
 
-### 從 v0 專案升級
-
-**從 GitHub 取得新版**
+### 從 v0 專案升級（一個指令）
 
 ```bash
 cd <你的>/.claude/skills/netlist-deep-dive
-git pull                       # 或重新 clone
-python -m unittest discover -s tests    # 應為 OK
+git pull
+python scripts/ndd.py migrate "C:/path/to/analysis" --run
 ```
 
-**升級既有的分析資料夾**
+跑完就可以開始問電路問題。`migrate --run` 會：
 
-```bash
-python scripts/ndd.py migrate "C:/path/to/analysis"
-```
+| # | 動作 |
+|---|---|
+| 1 | `bom_kind` → `bom_scope`、補齊新欄位（原檔備份為 `ndd.json.v0.bak`） |
+| 2 | **還原 v0 內建模型** —— 只加這個專案實際用得到的，只合併不覆蓋 |
+| 3 | 清掉欄位已變動的 `export/` 與 `REVIEW.md` |
+| 4 | 依序跑 export → datasheets → audit → mate → trace → coverage → blockers → manifest → review |
+| 5 | 寫出 `SETUP.md` 升級報告 |
 
-`migrate` 只改 `ndd.json`（原檔備份為 `ndd.json.v0.bak`），**不動任何 `.asc`
-／BOM／datasheet**：
+**為什麼要還原模型**：v0 把那四個模型內建自動載入，不還原等於靜默改變行為
+（追跡會突然停在那些 IC 上）。`migrate` 的職責是**在新語意下保持原有行為**。
+寫進你的 `models.json` 之後它們就是**你的宣告**，`audit` 與 `REVIEW.md` 會把
+它們列進要複核的清單 —— 這和「模型不自動載入」不衝突：那條原則反對的是
+**執行期默默生效**。
 
-- `bom_kind` → `bom_scope`（含 `SMT` 字樣 → `smt_only`，其餘 `complete`）
-- 補上 `mate_map` / `part_package` / `endpoints` / `sheet` / `expand_ranges`
-- 可重複執行；已是 v1 格式時不動作
+⚠️ 還原的模型 `pin_roles` 留空、`direction` 是依元件型別判定的，**仍須複核**。
 
-然後印出剩下要人工處理的三件事：
+**預設不下載 datasheet**（要下載加 `--datasheets`）—— 升級指令不該無預警發網路
+請求，缺的會列在 `MISSING.md`。
 
-1. **`models.json` 的 `pairs`** —— **不自動轉換**。舊 schema 沒有方向資訊，
-   照抄會把「單向元件可雙向走」的錯誤帶進新 schema。要重翻 datasheet 補
-   `direction`、`pin_roles`、結構化的 `control`（見 `references/models.md`）。
-   若專案原本沒有 `models.json` 卻依賴 v0 內建的 4 個模型（bus switch /
-   buffer / clock fanout / I²C mux），要自行查證後建立。
-2. **`verified-pins.csv` 舊列** —— 自動標為待重新確認。原文還在可以讀，但
-   不會被當成已解析的快取使用。需要哪支腳就重跑 `pinfn`。
-3. **衍生產物刪掉重跑** —— `export/`、`REVIEW.md`。
+**唯一會擋下來的情況**：你手寫過 `models.json` 且還是舊的 `pairs` schema。
+**不做自動轉換** —— 舊 schema 沒有方向資訊，機械轉成 `transfer` 只會把「單向
+元件可雙向走」的錯誤帶進新 schema，而那正是這次要修的東西。改寫後再跑一次。
 
-```bash
-rm -rf export REVIEW.md
-python scripts/ndd.py --config <你的>/ndd.json audit
-python scripts/ndd.py --config <你的>/ndd.json review
-```
+**實測**：4 板專案（3761 parts、63 條斷言）一個指令跑完，`audit` PASS，
+4 個模型全部還原，`SETUP.md` 列出 `X-Band PGA chip`（擋 1188 條）與
+`SN74LV595`（612 條）為優先建模對象。
 
 **或者：重新 init**
 
-若專案的手寫設定不多（沒有 `assertions` / `role_rules` / `net_normalize`），
-直接重新 init 更省事——新版 init 會一路跑完並產生所有 `.md`：
-
-```bash
-python scripts/ndd.py init "C:/path/to/analysis" --plan   # 先看它打算怎麼做
-python scripts/ndd.py init "C:/path/to/analysis" --run --force
-```
-
-⚠️ 重新 init 會**覆蓋 `ndd.json`**，手寫的斷言與命名規則會消失。有那些東西
-就走 `migrate`。
-
-**實測**：一個 4 板專案（3761 parts、63 條斷言、16 組對接）走 `migrate` 後，
-只有 4 條 `i2c_addr` 斷言失敗（因為缺 `models.json`）；補上模型後 `audit` PASS。
+手寫設定不多（沒有 `assertions` / `role_rules` / `net_normalize`）就直接
+`init --run --force` 更省事。⚠️ 會覆蓋 `ndd.json`，手寫的斷言與命名規則會消失。
 
 ### 預期的落差
 
