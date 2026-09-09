@@ -80,6 +80,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 
 | 檔案 | 說明 |
 |---|---|
+| `CHANGELOG.md` | 版本紀錄與 v0 對比 |
 | `SPEC.md` | 行為契約與施工規格 |
 | `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
