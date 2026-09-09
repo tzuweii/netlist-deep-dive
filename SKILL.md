@@ -126,29 +126,55 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 
 ---
 
-## Phase 0 — 收檔案、建專案
+## Phase 0 — 收檔案、建專案（`init` 一次跑完）
 
-1. 每塊板一份 `.asc` + 一份 BOM。缺 BOM 就先問。
+1. 每塊板一份 `.asc` + 一份 BOM，丟進同一個資料夾。缺 BOM 就先問。
+
+2. **先看 init 打算怎麼做**（只讀，不寫任何檔案）：
 
 ```bash
-PYTHONIOENCODING=utf-8 python scripts/ndd.py init "C:/path/to/analysis"
+PYTHONIOENCODING=utf-8 python scripts/ndd.py init "C:/path/to/analysis" --plan
 ```
 
-`init` 用 **refdes 交集**配對 netlist 與 BOM（不是用檔名猜）。命中率 < 90% 或
-與次佳差距 < 30% 會標 `!! 需人工確認`。
+會印出三件事：netlist ↔ BOM 配對（**用 refdes 交集，不用檔名猜**）、連接器對接
+候選與排名證據、datasheet 盤點。
 
-2. 人工補完 `ndd.json`（`init` 會寫出所有欄位的空殼）：
-   - `boards[*].bom_scope` — 預設 `complete`（BOM 即權威）。只有拿到
-     **SMT BOM** 時要改成 `smt_only`，那會讓連接器/測試點/手插件的缺席
-     標為不可判定，而非未貼件。
-   - `mates` — 連接器對接關係
-   - `mate_map` — **已批准**的腳位對映（可以先留空，見 Phase 4）
-   - `endpoints` — refdes 或料號 → `terminal` / `stateful` / `unknown_stop`
-   - `part_package` — **先留空**，只在工具要求時才填（見 Phase 3）
-   - `net_normalize`、`trace.start`、`trace.slot_pattern`
+3. **只有兩件事要問使用者**，用 `AskUserQuestion` 一次問完：
 
-3. 用 **AskUserQuestion** 問清楚：這些板子怎麼組成一台？哪些連接器對接？
-   有沒有線束？**不要自己猜拓樸。**
+   - **BOM 配對** —— 只在 `--plan` 標「需你確認」時問，附候選清單
+   - **datasheet** —— 下載還是跳過（跳過仍會產生缺件清單）
+
+4. **一路跑完，中途不再停**：
+
+```bash
+python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
+```
+
+依序執行 `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
+→ `manifest` → `review`，**任一步失敗不中止**，結果寫進 `SETUP.md`。
+
+產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、
+`datasheets/MISSING.md`、`export/*.csv`。
+
+5. **跑完後我接手寫架構文件** —— 那是分析結論，腳本產不出來。
+
+### init 自動決定與不決定的
+
+| 項目 | 自動 | 條件 |
+|---|---|---|
+| netlist ↔ BOM 配對 | ✅ | refdes 命中率 ≥ 90% 且領先次佳 ≥ 30%；否則**停下來問** |
+| `bom_scope` | ✅ | 檔名含 `SMT` → `smt_only`，否則 `complete` |
+| `mates` | ✅ | 腳數 ≥ 8、直通唯一勝出、零矛盾、語意相符 ≥ 4、margin ≥ 2 |
+| `mates`（兩側都有同分候選） | ❌ | **netlist 真的分不出來**，列進 `SETUP.md` 等人決定 |
+| `trace.start` | 後援 | 未設時自動用所有對接連接器當起點 |
+| `net_normalize` | ❌ | 專案命名習慣，猜不得（見 `pitfalls.md` #8）。init 會**列出兩側命名差異樣本**供你寫規則 |
+| `endpoints` / `part_package` / `mate_map` | ❌ | 留空，列進 `SETUP.md` 待補 |
+
+⚠️ **`net_normalize` 對對接判定是決定性的。** 實測同一組 40-pin 連接器：沒有
+規則時 16 vs 16（判不出來），有規則時 36 vs 32（定案）。填好後重跑 `mate`。
+
+6. 用 **AskUserQuestion** 問清楚：這些板子怎麼組成一台？有沒有線束？
+   **不要自己猜拓樸。**
 
 ## Phase 1 — 盤點與初步理解
 

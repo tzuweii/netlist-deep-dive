@@ -54,6 +54,9 @@ class MateMapError(Exception):
 # 對接排名要多有把握才算定案。比照 mate 報告既有的判讀：直通唯一勝出、
 # 零矛盾、且語意相符的領先幅度夠大。
 MATE_MIN_MARGIN = 2
+# 冠軍至少要有這麼多支腳的 net 名兩側相符 —— 這是**正面證據**的下限。
+# 沒有它，「零矛盾」在資訊量不足的小連接器上會無條件通過。
+MATE_MIN_SEMANTIC = 4
 
 _BLOCKING = {"package:unresolved": "package_unresolved",
              "package:conflict": "package_conflict",
@@ -186,6 +189,11 @@ class Fabric(object):
             return False, why + "；**勝出的不是直通**"
         if b1 != 0:
             return False, why + "；最佳仍有矛盾腳"
+        if -m1 < MATE_MIN_SEMANTIC:
+            # ⚠️ 「零矛盾」在小型連接器上是**空過的檢查**：5 腳同軸接頭兩側都
+            #    沒有相符的 net 名，任何對應都零矛盾。沒有正面證據就不能定案。
+            return False, (why + "；**沒有正面證據**（語意相符 %d < %d），"
+                           "零矛盾在此無鑑別力" % (-m1, MATE_MIN_SEMANTIC))
         if b2 == 0 and margin < MATE_MIN_MARGIN:
             return False, why + "；與次佳難以區分"
         return True, why

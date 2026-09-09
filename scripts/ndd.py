@@ -126,52 +126,317 @@ def pn_of(bom, refdes):
 
 
 # ------------------------------------------------------------------- 子命令 --
-def cmd_init(args):
-    d = os.path.abspath(args.dir)
+# ------------------------------------------------------------------- init --
+def _is_connector(nl, refdes):
+    fp = (nl.parts.get(refdes) or "").lower()
+    return fp.startswith("conn") or bool(re.match(r"^J\d", refdes))
+
+
+def _scan(d):
+    """掃描資料夾並解析。回傳 (netlists, boms, skipped)。"""
     ascs = sorted(f for f in os.listdir(d) if f.lower().endswith(".asc"))
     xlsx = sorted(f for f in os.listdir(d)
                   if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$"))
     if not ascs:
         raise SystemExit("%s 底下沒有 .asc" % d)
-    # ⚠️ 不要用檔名猜 netlist 與 BOM 的配對——檔名常含共通 token（產品線代號、
-    #    日期），猜錯了不會有任何跡象。改用 **refdes 交集**：BOM 的 refdes 應該
-    #    幾乎全部出現在對應的 netlist 裡。
-    boms = {}
+    netlists = [(f, Netlist(os.path.join(d, f))) for f in ascs]
+    boms, skipped = {}, []
     for x in xlsx:
         try:
             boms[x] = Bom(os.path.join(d, x))
         except Exception as exc:
-            print("  (略過 %s：%s)" % (x, exc))
+            # ⚠️ 解析不了的 BOM 不能只印一行就算了 —— 它會靜默退出配對池，
+            #    害某塊板配到錯的 BOM。列進報告要求人工處理。
+            skipped.append((x, str(exc)))
+    return netlists, boms, skipped
 
-    boards = {}
-    low_conf = []
-    for a in ascs:
-        nl = Netlist(os.path.join(d, a))
-        key = re.sub(r"[^A-Za-z0-9]+", "_", os.path.splitext(a)[0]).strip("_").lower()[:12]
+
+def _board_key(fname, used):
+    """board key：可讀、不撞名。舊版硬截 12 字元會讓日期開頭的檔名變 `20260723_fec`。"""
+    stem = os.path.splitext(fname)[0]
+    # 去掉開頭的日期段與流水號，取有意義的字
+    stem = re.sub(r"^\d{6,8}[_\-\s]*", "", stem)
+    toks = [t for t in re.split(r"[^A-Za-z0-9]+", stem) if t]
+    key = "_".join(toks[:3]).lower()[:20] or "board"
+    n, base = 2, key
+    while key in used:
+        key = "%s%d" % (base, n)
+        n += 1
+    used.add(key)
+    return key
+
+
+def _pair_boards(netlists, boms):
+    """netlist ↔ BOM 配對。回傳每塊板的完整候選排名，不只最佳。"""
+    used, rows = set(), []
+    for fname, nl in netlists:
         scored = []
-        for x, b in boms.items():
-            if not b.ref:
+        for x, bm in boms.items():
+            if not bm.ref:
                 continue
-            hit = sum(1 for r in b.ref if r in nl.parts)
-            scored.append((hit / float(len(b.ref)), hit, len(b.ref), x))
+            hit = sum(1 for r in bm.ref if r in nl.parts)
+            scored.append((hit / float(len(bm.ref)), hit, len(bm.ref), x))
         scored.sort(reverse=True)
-        best, ratio = "", 0.0
-        if scored:
-            ratio, hit, tot, best = scored[0]
+        best = scored[0] if scored else (0.0, 0, 0, "")
         second = scored[1][0] if len(scored) > 1 else 0.0
-        conf = "OK" if ratio >= 0.9 and ratio - second >= 0.3 else "!! 需人工確認"
-        if conf != "OK":
-            low_conf.append(key)
-        boards[key] = {"label": os.path.splitext(a)[0], "asc": a, "bom": best,
-                       "bom_scope": "complete", "sheet": None, "ref_col": None,
-                       "expand_ranges": False}
-        print("  %-14s parts %5d / signals %5d" % (key, len(nl.parts), len(nl.nets)))
-        print("       -> BOM %-58s refdes 命中率 %.0f%% (次佳 %.0f%%)  %s"
-              % (best or "(無)", ratio * 100, second * 100, conf))
+        ok = best[0] >= 0.9 and best[0] - second >= 0.3
+        rows.append(dict(key=_board_key(fname, used), asc=fname, nl=nl,
+                         bom=best[3], ratio=best[0], second=second,
+                         ok=ok, candidates=scored[:4],
+                         smt_hint=bool(re.search(r"smt", best[3], re.I))))
+    return rows
+
+
+def _detect_mates(fab, boards):
+    """跨板連接器對接自動偵測。回傳 (定案, 歧義, 排除)。
+
+    ⚠️ **不用 footprint 同型分組。** 板對板是公母對接——Samtec 的 `SEAF` 對
+       `SEAM`、`TFM` 對 `SFM`，兩側 footprint 名稱本來就不同。用「同型」分組
+       會剛好把真正的對接排除掉。改用**腳數**分組，再讓排名去分勝負。
+
+    ⚠️ **兩側都有多個候選 = 實質歧義。** 實測：ECU 的 J902/J903 對 DPU 的
+       J2/J1004，四種組合分數**完全相同**（0 矛盾、23 語意），netlist 真的
+       分不出來。這種不能猜，要問人。
+       只有一側多個（一塊板的連接器對到 N 個同型槽位）則是合理的扇出。
+    """
+    conns = {}
+    for k, (nl, _b) in boards.items():
+        for rd in nl.parts:
+            if not _is_connector(nl, rd):
+                continue
+            pins = nl.pins(rd)
+            # ⚠️ 板對板對接的判別力來自「腳夠多、名字對得上」。同軸/RF 這種
+            #    少腳接頭的對應是**線束決定的**，netlist 判不出來，不要猜。
+            if len(pins) < 8:
+                continue
+            conns.setdefault(len(pins), []).append((k, rd))
+
+    passed, rejected = [], []
+    for npin, lst in sorted(conns.items()):
+        for i, (ba, ra) in enumerate(lst):
+            for bb, rb in lst[i + 1:]:
+                if ba == bb:
+                    continue                       # 同一塊板上的不算對接
+                ok, why = fab._rank_decides(ba, ra, bb, rb)
+                row = dict(a="%s.%s" % (ba, ra), b="%s.%s" % (bb, rb),
+                           pins=npin, why=why, mate=[ba, ra, bb, rb])
+                (passed if ok else rejected).append(row)
+
+    deg = {}
+    for r in passed:
+        deg[r["a"]] = deg.get(r["a"], 0) + 1
+        deg[r["b"]] = deg.get(r["b"], 0) + 1
+    accepted, ambiguous = [], []
+    for r in passed:
+        if deg[r["a"]] > 1 and deg[r["b"]] > 1:
+            ambiguous.append(r)
+        else:
+            accepted.append(r)
+    return accepted, ambiguous, rejected
+
+
+def _name_gap(fab, ba, ra, bb, rb, limit=5):
+    """列出直通對應下兩側名字不同的 net 樣本。
+
+    ⚠️ **只報觀察到的差異，不自己發明 `net_normalize` 規則。** 剝錯後綴會讓
+       `CLK_1` 與 `CLK_2` 正規化成同一個，排名反而失去鑑別力（pitfalls #8）。
+    """
+    pa, pb = fab.nl[ba].pins(ra), fab.nl[bb].pins(rb)
+    out = []
+    for p in sorted(pa):
+        na, nb = pa.get(p), pb.get(p)
+        if not na or not nb or fab.norm(na) == fab.norm(nb):
+            continue
+        if fab.cls(na) != fab.cls(nb):
+            continue                      # 類別就不同的是矛盾，不是命名差異
+        out.append("%s / %s" % (na, nb))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _plan(d):
+    netlists, boms, skipped = _scan(d)
+    rows = _pair_boards(netlists, boms)
+    print("=" * 78)
+    print("init --plan（只讀，不寫任何檔案）")
+    print("=" * 78)
+    print("\n[1] netlist ↔ BOM 配對（用 refdes 交集，不用檔名猜）")
+    need_ask = []
+    for r in rows:
+        print("  %-20s parts %5d / signals %5d" % (r["key"], len(r["nl"].parts),
+                                                   len(r["nl"].nets)))
+        print("       -> %s  命中率 %.0f%%（次佳 %.0f%%）  %s"
+              % (r["bom"] or "(無)", r["ratio"] * 100, r["second"] * 100,
+                 "OK" if r["ok"] else "!! 需你確認"))
+        if not r["ok"]:
+            need_ask.append(r)
+            for ratio, hit, tot, x in r["candidates"]:
+                print("          候選 %5.0f%%  (%d/%d)  %s" % (ratio * 100, hit, tot, x))
+        if r["smt_hint"]:
+            print("          （檔名含 SMT -> 建議 bom_scope: smt_only）")
+    if skipped:
+        print("\n  !! 有 %d 份 BOM 解析失敗，**不會參與配對**：" % len(skipped))
+        for x, why in skipped:
+            print("     %s —— %s" % (x, why))
+
+    boards = {r["key"]: (r["nl"], boms[r["bom"]]) for r in rows if r["bom"] in boms}
+    print("\n[2] 連接器對接自動偵測")
+    if len(boards) < 2:
+        print("  （只有一塊板，無跨板對接）")
+        acc, amb, rej = [], [], []
+    else:
+        fab = Fabric(boards, [], {}, None, [])
+        acc, amb, rej = _detect_mates(fab, boards)
+        print("  自動定案 %d 組、**需你確認** %d 組、排除 %d 組"
+              % (len(acc), len(amb), len(rej)))
+        for r in acc[:10]:
+            print("     OK  %s <-> %s (%d pin)" % (r["a"], r["b"], r["pins"]))
+        for r in amb:
+            print("     !!  %s <-> %s (%d pin) —— 兩側都有多個同分候選，"
+                  "netlist 分不出來" % (r["a"], r["b"], r["pins"]))
+        near = [r for r in rej if "難以區分" in r["why"]]
+        for r in rej[:4]:
+            print("     --  %s <-> %s (%d pin) —— %s"
+                  % (r["a"], r["b"], r["pins"], r["why"][:64]))
+        if near:
+            print("     ↳ 有 %d 組是「零矛盾但與次佳難以區分」。兩側命名差異樣本："
+                  % len(near))
+            for g in _name_gap(fab, *near[0]["mate"]):
+                print("         %s" % g)
+            print("       填好 ndd.json 的 net_normalize 後重跑 `ndd.py mate` "
+                  "可能就能定案。")
+
+    print("\n[3] datasheet 盤點")
+    ddir = os.path.join(d, "datasheets")
+    have = len([f for f in os.listdir(ddir)
+                if f.lower().endswith(".pdf")]) if os.path.isdir(ddir) else 0
+    pns = set()
+    for r in rows:
+        bm = boms.get(r["bom"])
+        if bm:
+            for rd in r["nl"].actives():
+                pn = bm.pn(rd)
+                if isinstance(pn, str) and pn:
+                    pns.add(pn)
+    print("  主動料號 %d 種；datasheets/ 現有 PDF %d 份" % (len(pns), have))
+    print("  自動下載只對少數原廠站有效，其餘要人工補。")
+
+    print("\n" + "-" * 78)
+    print("需要你決定：")
+    print("  1. BOM 配對 —— %s"
+          % ("全部高信心，無需確認" if not need_ask
+             else "%d 塊板需確認：%s" % (len(need_ask),
+                                        ", ".join(r["key"] for r in need_ask))))
+    print("  2. datasheet —— 要下載還是跳過（跳過仍會產生 MISSING.md 清單）")
+    print("\n決定後執行：ndd.py init <資料夾> --run [--bom key=檔名]... "
+          "[--no-datasheets]")
+    return rows, acc, amb, rej, skipped
+
+
+def _run_step(name, fn, results):
+    """跑一個步驟。**失敗不中止整條流程**，記錄下來寫進 SETUP.md。"""
+    print("\n" + "=" * 78)
+    print(">>> %s" % name)
+    print("=" * 78)
+    try:
+        out = fn()
+        results.append((name, "OK", ""))
+        return out
+    except SystemExit as exc:
+        results.append((name, "跳過", str(exc)))
+        print("（跳過：%s）" % exc)
+    except Exception as exc:
+        results.append((name, "失敗", str(exc)))
+        print("!! 失敗：%s" % exc)
+    return None
+
+
+SETUP_TMPL = u"""# 專案建立報告
+
+> 由 `ndd.py init --run` 產生於 {date}。
+> **這份檔案記錄 init 做了什麼、你確認了什麼、還缺什麼。**
+
+## 1. 自動決定的
+
+### netlist ↔ BOM 配對
+用 **refdes 交集**配對（不用檔名猜 —— 檔名常含產品線代號與日期這種共通 token）。
+
+{pairing}
+
+### 連接器對接
+門檻與 `ndd.py mate` 相同：**直通唯一勝出 + 零矛盾 + margin ≥ 2**
+（亞軍也乾淨時才要求 margin）。連接器只負責「訊號有沒有連到」，netlist 連得上
+即事實，不需要 datasheet。
+
+自動寫入 {n_acc} 組：
+
+{mates_ok}
+
+未能定案 {n_rej} 組（**已列出但沒寫進 ndd.json**）：
+
+{mates_no}
+
+## 2. 你確認過的
+
+{decisions}
+
+## 3. 流程執行結果
+
+{steps}
+
+## 4. 需要你補的
+
+{todo}
+
+---
+
+逐腳查詢用 `ndd.py pins/net/part`，不要靠本文。
+"""
+
+
+def cmd_init(args):
+    import datetime
+    d = os.path.abspath(args.dir)
+    if not args.run:
+        _plan(d)
+        return
+
+    netlists, boms, skipped = _scan(d)
+    rows = _pair_boards(netlists, boms)
+    override = dict(kv.split("=", 1) for kv in (args.bom or []))
+    for r in rows:
+        if r["key"] in override:
+            r["bom"], r["ok"], r["forced"] = override[r["key"]], True, True
+    unresolved = [r for r in rows if not r["ok"]]
+    if unresolved and not args.accept_pairing:
+        raise SystemExit(
+            "以下板子的 BOM 配對信心不足，**必須先確認**：%s\n"
+            "  用 --bom <key>=<檔名> 指定，或確認後加 --accept-pairing。\n"
+            "  先跑 `ndd.py init %s --plan` 看候選清單。"
+            % (", ".join(r["key"] for r in unresolved), args.dir))
+
+    boards_cfg = {}
+    for r in rows:
+        boards_cfg[r["key"]] = {
+            "label": os.path.splitext(r["asc"])[0], "asc": r["asc"],
+            "bom": r["bom"], "bom_scope": "smt_only" if r["smt_hint"] else "complete",
+            "sheet": None, "ref_col": None, "expand_ranges": False}
+
+    loaded = {r["key"]: (r["nl"], boms[r["bom"]]) for r in rows if r["bom"] in boms}
+    acc, amb, rej = ([], [], [])
+    if len(loaded) >= 2:
+        acc, amb, rej = _detect_mates(Fabric(loaded, [], {}, None, []), loaded)
+    n_auto = len(acc)
+    if amb and args.accept_mates:
+        for r in amb:
+            r["confirmed"] = True
+        acc, amb = acc + amb, []
+
     cfg = {
-        "project": os.path.basename(os.path.dirname(d)) or "unnamed",
-        "boards": boards,
-        "mates": [],
+        "project": os.path.basename(d.rstrip("\\/")) or "unnamed",
+        "boards": boards_cfg,
+        "mates": [r["mate"] for r in acc],
         # ⚠️ 未出現在骨架裡的欄位，使用者不會知道它存在 —— 一律寫出空殼。
         "mate_map": {},
         "part_package": {},
@@ -188,19 +453,87 @@ def cmd_init(args):
         raise SystemExit("%s 已存在，要覆蓋請加 --force" % p)
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(cfg, indent=2, ensure_ascii=False))
-    print("\n寫出 %s" % p)
-    if low_conf:
-        print("\n⚠️ 這幾塊板的 BOM 配對信心不足，**請人工確認 ndd.json 的 bom 欄**：%s"
-              % ", ".join(low_conf))
-    print("接著要人工補：")
-    print("  boards[*].bom_scope  complete（預設）/ smt_only")
-    print("                       BOM 即權威，缺席即未貼件；SMT BOM 另需注意")
-    print("                       連接器/測試點/手插件不在其涵蓋範圍")
-    print("  mates / mate_map     對接關係；mate_map 是已批准的腳位對映，")
-    print("                       未批准時 trace 仍可跑，但每列會帶 mate:unapproved")
-    print("  part_package         只在 datasheet 多封裝欄且會改變答案時才需要")
-    print("  endpoints            refdes 或 MPN -> terminal / stateful / unknown_stop")
-    print("  net_normalize / trace.start")
+    print("寫出 %s" % p)
+
+    # ---- 一路跑完，中間不再詢問 ----
+    pj = Project(p)
+    results = []
+    def A(**kw):
+        base = dict(board="all", outdir="export", limit=40, signal=None,
+                    pn=None, url=None, no_download=False)
+        base.update(kw)                 # ⚠️ 用 update，不要當關鍵字傳兩次
+        return argparse.Namespace(**base)
+
+    _run_step("export —— 逐腳事實表", lambda: cmd_export(A(), pj), results)
+    if not args.no_datasheets:
+        _run_step("datasheets —— 盤點與下載", lambda: cmd_datasheets(A(), pj), results)
+    else:
+        _run_step("datasheets —— 只盤點不下載",
+                  lambda: cmd_datasheets(A(no_download=True), pj), results)
+    stats = _run_step("audit —— 一致性稽核", lambda: run_audit(
+        pj.cfg, pj.all_boards("all"), pj.models), results)
+    _run_step("mate —— 連接器對接排名", lambda: cmd_mate(A(), pj), results)
+    _run_step("trace —— 端到端訊號鏈", lambda: cmd_trace(A(), pj), results)
+    _run_step("coverage —— per-MPN 三源覆蓋", lambda: cmd_coverage(A(), pj), results)
+    _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
+    _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
+
+    # ---- SETUP.md ----
+    pairing = "\n".join(
+        "- `%s` ← `%s`（命中率 %.0f%%，次佳 %.0f%%）%s%s"
+        % (r["key"], r["bom"] or "(無)", r["ratio"] * 100, r["second"] * 100,
+           "　**你指定的**" if r.get("forced") else "",
+           "　bom_scope=smt_only（檔名含 SMT）" if r["smt_hint"] else "")
+        for r in rows)
+    if skipped:
+        pairing += "\n\n**%d 份 BOM 解析失敗，未參與配對：**\n" % len(skipped)
+        pairing += "\n".join("- `%s` —— %s" % x for x in skipped)
+    todo = []
+    if amb:
+        todo.append("- [ ] **%d 組對接兩側都有同分候選** —— netlist 分不出來，"
+                    "請直接編輯 `ndd.json` 的 `mates` 指定正確組合" % len(amb))
+    if rej:
+        todo.append("- [ ] **%d 組對接被排除** —— 見上方原因；若確實對接請手動加入"
+                    % len(rej))
+    if stats:
+        if stats.get("model_pending"):
+            todo.append("- [ ] **%d 項封裝待指定** —— 見 `ndd.py audit` [1.5] 段"
+                        % len(stats["model_pending"]))
+        if stats.get("model_inferred"):
+            todo.append("- [ ] **%d 項封裝是推論的** —— 請複核" % len(stats["model_inferred"]))
+    todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載與穿越件"
+                "逐一填進 `ndd.json` 的 `endpoints`")
+    todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/MISSING.md`")
+    todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
+    todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
+                "要聚焦某條鏈請填入")
+    txt = SETUP_TMPL.format(
+        date=datetime.date.today().isoformat(),
+        pairing=pairing,
+        n_acc=len(acc), n_rej=len(rej) + len(amb),
+        mates_ok="\n".join("- `%s <-> %s`（%d pin）　%s" % (r["a"], r["b"], r["pins"], r["why"])
+                            for r in acc) or "- （無）",
+        mates_no="\n".join("- `%s <-> %s`（%d pin）　%s" % (r["a"], r["b"], r["pins"], r["why"])
+                            for r in rej) or "- （無）",
+        decisions="- BOM 配對：%s\n- datasheet：%s\n- 對接：%s"
+                  % ("已由你指定 " + ", ".join(override) if override
+                     else ("你確認採用自動配對" if args.accept_pairing
+                           else "全部高信心，未需確認"),
+                     "跳過下載（仍產生 MISSING.md）" if args.no_datasheets else "已嘗試下載",
+                     ("自動定案 %d 組；另 %d 組兩側同分，你確認一併採用"
+                      % (n_auto, len(acc) - n_auto)) if len(acc) > n_auto
+                     else "自動定案 %d 組" % n_auto),
+        steps="\n".join("- %-28s %s%s" % (n, st, "　—— " + why[:60] if why else "")
+                         for n, st, why in results),
+        todo="\n".join(todo))
+    sp = os.path.join(d, "SETUP.md")
+    with io.open(sp, "w", encoding="utf-8") as fh:
+        fh.write(txt)
+    print("\n" + "=" * 78)
+    print("寫出 %s" % sp)
+    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md"
+          "%s" % ("" if args.no_datasheets else " / datasheets/MISSING.md"))
+    print("可以開始問電路問題了。")
 
 
 def cmd_pins(args, pj):
@@ -339,10 +672,21 @@ def cmd_audit(args, pj):
 def cmd_trace(args, pj):
     tcfg = pj.cfg.get("trace") or {}
     starts = tcfg.get("start") or []
-    if not starts:
-        raise SystemExit("ndd.json 的 trace.start 是空的，例如 "
-                         '[{"board":"ecu","conn":"J902","rail":"P"}]')
     fab = pj.fabric()
+    if not starts:
+        # ⚠️ 舊版在這裡直接中止，讓 init 無法一路跑完。改為**自動用所有參與
+        #    對接的連接器當起點** —— 追得到什麼算什麼，總比什麼都不產出好。
+        seen = []
+        for ba, ra, bb, rb in fab.mates:
+            for k, rd in ((ba, ra), (bb, rb)):
+                if (k, rd) not in seen:
+                    seen.append((k, rd))
+        starts = [{"board": k, "conn": rd, "rail": ""} for k, rd in seen]
+        if not starts:
+            raise SystemExit("trace.start 是空的，且沒有任何 mates 可當起點。"
+                             "請填 ndd.json 的 trace.start 或 mates。")
+        print("（trace.start 未設 —— 自動用 %d 個對接連接器當起點。"
+              "要聚焦某條鏈請填 trace.start。）" % len(starts))
     amb = [k for k, v in fab.mate_status.items() if v == "ambiguous"]
     inf = [k for k, v in fab.mate_status.items() if v == "inferred"]
     if inf:
@@ -891,7 +1235,15 @@ def main(argv=None):
     ap.add_argument("--outdir", default="export")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("init"); p.add_argument("dir"); p.add_argument("--force", action="store_true"); p.set_defaults(func=cmd_init, noproj=True)
+    p = sub.add_parser("init"); p.add_argument("dir")
+    p.add_argument("--plan", action="store_true", help="只讀不寫，印出配對與對接候選")
+    p.add_argument("--run", action="store_true", help="寫設定並一路跑完所有流程")
+    p.add_argument("--bom", action="append", metavar="KEY=檔名", help="指定某塊板的 BOM")
+    p.add_argument("--accept-pairing", action="store_true", help="確認採用自動配對")
+    p.add_argument("--accept-mates", action="store_true", help="連同同分的對接候選一併採用")
+    p.add_argument("--no-datasheets", action="store_true", help="跳過下載，只產生缺件清單")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_init, noproj=True)
     p = sub.add_parser("pins"); p.add_argument("refdes", nargs="+"); p.set_defaults(func=cmd_pins)
     p = sub.add_parser("net"); p.add_argument("pattern", nargs="+"); p.add_argument("-v", "--verbose", action="store_true"); p.set_defaults(func=cmd_net)
     p = sub.add_parser("part"); p.add_argument("pattern", nargs="+"); p.set_defaults(func=cmd_part)
