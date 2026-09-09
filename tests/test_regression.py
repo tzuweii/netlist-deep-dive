@@ -18,8 +18,9 @@ import ndd_confidence as C                                     # noqa: E402
 import ndd_package                                             # noqa: E402
 import ndd_pinfn                                               # noqa: E402
 from ndd_bom import Bom, is_ambiguous                          # noqa: E402
-from ndd_graph import (EP_UNCLASSIFIED, EP_UNKNOWN_DECLARED,   # noqa: E402
-                       EP_UNKNOWN_UNUSABLE, Fabric, MateMapError)
+from ndd_graph import (EP_DRIVER, EP_UNCLASSIFIED,             # noqa: E402
+                       EP_UNKNOWN_DECLARED, EP_UNKNOWN_UNUSABLE,
+                       Fabric, MateMapError)
 from ndd_models import (ModelError, derive_gating, load_models,  # noqa: E402
                         missing_pins, outgoing, select_model,
                         transfer_edges, transfer_for)
@@ -480,6 +481,40 @@ class TestEndpoints(unittest.TestCase):
                           "封裝推定後應可穿越")
         cav = fab.pkg_res[("a", "U1")]["caveats"]
         self.assertIn("package:inferred", cav, "推論仍要標記")
+
+
+class TestDriverEndpoint(unittest.TestCase):
+    def test_buffer_output_reached_backwards_is_a_driver_not_a_load(self):
+        """反向走到緩衝器的輸出腳 = 訊號來源，不是負載。
+
+        對稱模型看不到這件事（會直接穿過去）；有向模型才分得出來。
+        把驅動器算進 loads 等於把「誰送出這條訊號」講成「誰在收」。
+        """
+        pj = fixtures.Project()
+        pj.board("a", {"U1": "PKG24", "U2": "PKG8"},
+                 {"IN": [("U1", "2")], "OUT": [("U1", "18"), ("U2", "1")],
+                  "GND": [("U1", "1"), ("U1", "10")],
+                  "VDD_3V3": [("U1", "20")]},
+                 [{"Part Reference": "U1", "Manufacturer_PN": "BUF_A"},
+                  {"Part Reference": "U2", "Manufacturer_PN": "ADC_A"}],
+                 bom_scope="complete")
+        fab = _fab(pj, {"B": fixtures.buffer_model()})
+        kind, reason, _c = fab.endpoint_of(("a", "U1", "18"))
+        self.assertEqual(kind, EP_DRIVER)
+        self.assertIn("驅動端", reason)
+        import ndd_graph
+        self.assertNotIn(EP_DRIVER, ndd_graph.EP_IN_LOADS)
+
+    def test_input_side_still_traverses(self):
+        pj = fixtures.Project()
+        pj.board("a", {"U1": "PKG24"},
+                 {"IN": [("U1", "2")], "OUT": [("U1", "18")],
+                  "GND": [("U1", "1"), ("U1", "10")],
+                  "VDD_3V3": [("U1", "20")]},
+                 [{"Part Reference": "U1", "Manufacturer_PN": "BUF_A"}],
+                 bom_scope="complete")
+        fab = _fab(pj, {"B": fixtures.buffer_model()})
+        self.assertIsNone(fab.endpoint_of(("a", "U1", "2")))
 
 
 class TestHintGraphSeparation(unittest.TestCase):

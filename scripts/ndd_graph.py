@@ -41,7 +41,10 @@ EP_STATEFUL = "stateful(declared)"
 EP_UNKNOWN_DECLARED = "unknown_stop(declared)"
 EP_UNKNOWN_UNUSABLE = "unknown_stop(model_unusable)"
 EP_UNCLASSIFIED = "unclassified"
-# 進 loads 的端點種類：unknown_stop 不算，因為它是「停在具名位置」不是負載。
+# ⚠️ 驅動端：走到某顆的 transfer 輸出腳、且無法再往前走。這是訊號的**來源**
+#    不是負載。有向模型才分得出來——對稱模型會直接穿過去，看不到這件事。
+EP_DRIVER = "driver(model)"
+# 進 loads 的端點種類：unknown_stop 是「停在具名位置」、driver 是來源，都不算。
 EP_IN_LOADS = (EP_TERMINAL, EP_STATEFUL, EP_UNCLASSIFIED)
 
 class MateMapError(Exception):
@@ -397,6 +400,10 @@ class Fabric(object):
             edges = self._passive_edges(board, rd)
         if edges and outgoing(edges, pin):
             return None
+        if edges and any(pin == b for _a, b, _d, _e in edges):
+            # 走到 transfer 邊的**輸出**端且無法再前進 = 這裡是訊號來源。
+            # 把它算進 loads 會把驅動器講成負載。
+            return EP_DRIVER, "反向走到驅動端輸出腳", []
         declared = (self.endpoints.get("%s:%s" % (board, rd))
                     or self.endpoints.get(self._pn(board, rd)))
         if declared == "terminal":
