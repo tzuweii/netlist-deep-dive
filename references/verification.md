@@ -15,20 +15,50 @@
 |---|---|
 | `*PART*` 行數 vs parts 數 | 沒有元件被吞掉 |
 | `*SIGNAL*` 數 vs nets 數 | 沒有網路被吞掉 |
-| `refdes.pin` token 數 vs 收錄數 | 沒有腳位被吞掉 |
+| `refdes.pin` token 數 vs `nets` 收錄數 | 沒有腳位被吞掉 |
+| **`refdes.pin` token 數 vs `pinmap` 收錄數** | **沒有腳位被覆蓋** |
 | 同名 `*SIGNAL*` 數 | 0 表示沒有網路互相覆蓋 |
 | 幽靈 refdes | 出現在 `*NET*` 但 `*PART*` 沒有 → 0 表示兩區塊自洽 |
 | 未歸類行 | 0 表示沒有格式沒被處理到 |
 
+⚠️ **第四項是後來補的，缺它會漏掉一整類錯誤。** 同一支腳出現在兩條 net 時
+（設計短路或匯出錯誤），`pinmap` 只能留一個值、第一條 net 靜默消失；但
+token 數與 `nets` 收錄數**兩者都仍然相等**，所以舊版回報 PASS。
+只有比對 `pinmap` 的收錄數才抓得到。
+
 任何一項不過，**先修 parser，不要往下做**。
 
-### 第 1 層：元件腳位模型對得上 datasheet
+### 第 1 層：元件模型對得上 datasheet
 
-追跡結果完全建立在模型上。逐一開 datasheet 的 Pin Configuration 頁核對，
-把「檔名 + 頁碼 + 文件編號」寫進 `verified_against`。
+追跡結果完全建立在模型上。這一層有**三種強度不同**的檢查，不可混淆：
 
-`ndd_models.py` 會拒絕載入沒有 `verified_against` 的模型。**這個限制是刻意的，
-不要為了讓追跡跑通而繞過它**——追跡停在某顆 IC，是「這裡還沒查證」的正確表現。
+| 檢查 | 能證明什麼 | **不能**證明什麼 |
+|---|---|---|
+| `verified_against` 必填 | 有人聲稱翻過那一頁 | 那一頁真的寫了這件事 |
+| pin-existence（模型的腳存在於 netlist） | 沒打錯腳號、沒套錯腳數不同的衍生型號 | **封裝對不對** |
+| package 解析 | 用的是哪一欄腳位表 | 那一欄的功能解讀正確 |
+
+⚠️ **pin-existence check 不是封裝驗證。** 兩個封裝同為 1–N 而腳位定義不同時
+（這是常態），它必然通過。命名要誠實——名字若叫「封裝驗證」，名字本身就在
+製造假保證。
+
+`load_models()` 會拒絕載入沒有 `verified_against` 或 `package_basis` 的模型。
+**這個限制是刻意的，不要為了讓追跡跑通而繞過它**——追跡停在某顆 IC，是
+「這裡還沒查證」的正確表現。
+
+#### package 解析：三階惰性
+
+只在**會改變答案**時解析：
+
+| 階 | 情況 | 成本 |
+|---|---|---|
+| 1 | datasheet 腳位表只有一欄 → `not_applicable` | 零。且這是**已證明**無歧義，不是假設 |
+| 2 | 觀測腳位集 ⊆ 某欄合法集且唯一 → `auto_unique` | 零 |
+| 2b | 所有候選在用到的腳上**功能一致** → `shared_pinout` | 零 |
+| 3 | 多欄皆可容納／抽取失敗 → `unresolved_pending_user` | 問一次，只問這顆 |
+
+**不得以已接腳數推定封裝**（見 `pitfalls.md` #13）。抽取失敗時進第 3 階，
+不得退回腳數猜測。
 
 ### 第 2 層：內容斷言
 
@@ -125,4 +155,23 @@ netlist 沒有跨板連線，對接是**推論**。驗證方式不是「兩側�
 > **B 段（工具驗不到，需要你人工確認）**：腳位模型是否真的翻過 datasheet、
 > 證據薄弱的對接、rework 紀錄、線束、BOM 變體、文件裡的因果推論。
 
-`ndd.py review` 會把這兩段寫成 `REVIEW.md`。
+`ndd.py review` 會把這兩段寫成 `REVIEW.md`；`ndd.py coverage` 給 per-MPN 的
+三源覆蓋表。
+
+### 兩個獨立的軸，不要混講
+
+| 欄位 | 值 | 回答的問題 |
+|---|---|---|
+| `confidence` | `confirmed > caveated > unknown` | 這條結論的**證據**有多強 |
+| `gating` | `always` / `conditional` / `unknown` | 這條路徑**已查證**的通斷性質 |
+
+一條 datasheet 查證完整、package 已鎖定的 runtime-gated 路徑，證據品質是
+`confirmed`、通斷性質是 `conditional`。把兩者混成一個排序，會讓它排在
+「package 未佐證但恆通」之下——與事實相反，而且會誘使人為了拉高 confidence
+而迴避正確標註的 conditional。
+
+### 正式 trace 與 topology hint 不可互換
+
+`signal_chain.csv` 只含**已驗證的 signal_transfer 邊**，可作架構結論。
+`topology_hint.csv` 是控制、狀態、參數與未知邊界的**功能說明**——
+它不是連通關係，**永不得作為下一跳**。

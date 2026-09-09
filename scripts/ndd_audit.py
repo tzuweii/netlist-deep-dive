@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 """稽核引擎：把文件裡的主張變成可執行的斷言，跑一次就知道文件還對不對。
 
-設計取向：**一次性稽核，不是持續維護的回歸測試**。硬體設計改版頻率通常極低，
-跑完把結論寫回文件即可；但每次改版或換專案要能一鍵重跑。
+設計取向：**一次性稽核，不是持續維護的回歸測試**。
 
-四段檢查：
-  [0] parser 自我驗證 —— 最底層，parser 漏讀則上面全部不成立
-  [1] 文件斷言       —— 從文件抽出的具體主張，宣告式定義在 ndd.json
-  [2] 命名規則展開   —— ⚠️ 通則會有例外，逐顆展開比對才抓得到
-  [3] netlist vs BOM —— DNI 對帳
-  [4] 懸空網路       —— 單腳網路
+檢查段（見 SPEC.md §3 責任矩陣）：
+  [0]   parser 自我驗證 —— 最底層，parser 漏讀則上面全部不成立
+  [1]   文件斷言
+  [1.5] 元件模型 —— pin-existence 與 package 解析狀態
+  [2]   命名規則展開   —— ⚠️ 通則會有例外，逐顆展開比對才抓得到
+  [3]   netlist vs BOM —— 依 bom_scope 決定能不能說「未貼件」
+  [4]   懸空網路
+
+⚠️ **「待辦」與「錯誤」必須可區分，且待辦不得讓 audit 假性通過。**
+   跑完 audit 全 PASS 卻仍有未解事項，就等於回到「綠燈不代表查過」。
 """
 import re
 
-from ndd_models import i2c_addr
+from ndd_bom import is_ambiguous
+from ndd_models import i2c_addr, missing_pins, select_model
 from ndd_pads import refkey
 
 
@@ -51,11 +55,22 @@ def run_assertion(a, nl, bom, models):
         return not bad, ("全部相符" if not bad else "; ".join(bad[:3]))
 
     if k == "bom_value":
-        got = bom.value(a["refdes"]) or ""
+        got = bom.value(a["refdes"])
+        if is_ambiguous(got):
+            return False, "bom:ambiguous %s" % got
+        got = got or ""
         return a["contains"].lower() in got.replace(" ", "").lower(), got
 
     if k == "not_stuffed":
+        # ⚠️ 只有 complete BOM 才能證明「沒貼」。SMT BOM／變體／未知範圍的缺件
+        #    只代表不在這份 BOM 的範圍內，不是未貼件。
+        if not bom.scope_supports_dni():
+            return False, ("bom-scope-insufficient（scope=%s，無法證明未貼件）"
+                           % bom.scope)
         rds = a["refdes"] if isinstance(a["refdes"], list) else [a["refdes"]]
+        amb = [r for r in rds if is_ambiguous(bom.of(r))]
+        if amb:
+            return False, "bom:ambiguous %s" % amb
         stuffed = [r for r in rds if bom.of(r) is not None]
         return not stuffed, ("皆未貼件" if not stuffed else "這些其實有貼: %s" % stuffed)
 
@@ -76,9 +91,14 @@ def run_assertion(a, nl, bom, models):
         return ok, "%d 條" % len(sp)
 
     if k == "i2c_addr":
-        got = i2c_addr(models, nl, a["refdes"], bom.pn(a["refdes"]) or "")
+        pn = bom.pn(a["refdes"])
+        pn = "" if is_ambiguous(pn) else (pn or "")
+        got, cav = i2c_addr(models, nl, a["refdes"], pn)
         want = int(a["expect"], 16) if isinstance(a["expect"], str) else a["expect"]
-        return got == want, (hex(got) if got is not None else "無法判定（模型未定義 addr）")
+        if got is None:
+            return False, "無法判定（模型未定義 addr%s）" % (
+                "；" + ",".join(cav) if cav else "")
+        return got == want, hex(got)
 
     if k == "net_exists":
         return a["net"] in nl.nets, (a["net"] in nl.nets)
@@ -98,7 +118,13 @@ def role_check(nl, bom, rule, out):
                 out.append("  X  %-10s 不存在於 netlist（規則預期 %s）" % (rd, pn))
                 bad += 1
                 continue
-            got = bom.pn(rd) or "(不在 BOM -> DNI)"
+            got = bom.pn(rd)
+            if is_ambiguous(got):
+                out.append("  X  %-10s BOM 多列衝突（列 %s），無法比對"
+                           % (rd, ",".join(str(x) for x in got.rows)))
+                bad += 1
+                continue
+            got = got or ("(不在 BOM -> %s)" % bom.absent_label())
             if got.upper() == pn.upper():
                 continue
             if rd in exc:
@@ -112,10 +138,51 @@ def role_check(nl, bom, rule, out):
     return bad
 
 
+def model_check(cfg, boards, models, out):
+    """[1.5] 元件模型 —— pin-existence 與 package 解析狀態。
+
+    ⚠️ pin-existence 是 **sanity check，不是 package 驗證**：兩個封裝同為 1–N
+       而腳位定義不同時它必然通過。它能抓的是打錯、以及照抄了不同衍生型號。
+    """
+    part_pkg = cfg.get("part_package") or {}
+    fails, pending = [], []
+    for b, (nl, bom) in sorted(boards.items()):
+        for rd in sorted(nl.parts, key=refkey):
+            pn = bom.pn(rd)
+            pn = "" if is_ambiguous(pn) else (pn or "")
+            pkg = part_pkg.get("%s:%s" % (b, rd)) or part_pkg.get(pn)
+            name, m, cav = select_model(models, nl.parts.get(rd, ""), pn, pkg)
+            if "model:ambiguous" in cav:
+                fails.append("%s.%s 多個模型同分命中，無法定案" % (b, rd))
+                continue
+            if "package:conflict" in cav:
+                fails.append("%s.%s 宣告封裝與模型不相容（%s）" % (b, rd, pkg))
+                continue
+            if "package:unresolved" in cav:
+                pending.append("%s.%s (%s) 需指定 package" % (b, rd, pn or "?"))
+                continue
+            if m is None:
+                continue
+            miss = missing_pins(m, nl.pins(rd).keys())
+            if miss:
+                fails.append("%s.%s 模型 %s 引用的腳 %s 不存在於 netlist"
+                             % (b, rd, name, ",".join(miss)))
+    if not models:
+        out.append("  （尚未定義任何模型 —— 追跡會停在每顆主動件）")
+    for f in fails:
+        out.append("  FAIL %s" % f)
+    for p in pending:
+        out.append("  待辦 %s" % p)
+    if models and not fails and not pending:
+        out.append("  全部通過")
+    return fails, pending
+
+
 def run_audit(cfg, boards, models):
     """boards: {key: (Netlist, Bom)}。回傳供 review 清單使用的統計。"""
-    stats = {"assert_pass": 0, "assert_fail": [], "role_bad": 0, "dni": {},
-             "floating": {}, "parser_fail": []}
+    stats = {"assert_pass": 0, "assert_fail": [], "role_bad": 0, "absent": {},
+             "floating": {}, "parser_fail": [], "model_fail": [],
+             "model_pending": [], "bom_dups": {}, "bom_ranges": {}, "ok": True}
 
     print("=" * 78)
     print("netlist / BOM 一致性稽核")
@@ -127,12 +194,19 @@ def run_audit(cfg, boards, models):
         if not r["ok"]:
             stats["parser_fail"].append(k)
         print("  %-4s [%s] parts %d/%d, signals %d/%d, pin token %d/%d, "
-              "重名 %d, 幽靈 refdes %d, 未歸類行 %d"
+              "pinmap %d/%d, 重名 %d, 幽靈 refdes %d, 未歸類行 %d"
               % ("PASS" if r["ok"] else "FAIL", k, r["parts"][0], r["parts"][1],
                  r["nets"][0], r["nets"][1], r["pins"][0], r["pins"][1],
-                 r["dup_signal"], len(r["ghost"]), len(r["stray"])))
+                 r["mapped"][0], r["mapped"][1], r["dup_signal"],
+                 len(r["ghost"]), len(r["stray"])))
+        if r["dup_pins"]:
+            print("         !! 同一支腳出現在多條 net（pinmap 已丟失前值）：")
+            for d in r["dup_pins"][:5]:
+                print("            %s" % d)
         if r["stray"]:
             print("         未歸類: %s" % r["stray"][:3])
+    if stats["parser_fail"]:
+        print("  ** parser 自我驗證失敗，下游結論一律不成立。先修 parser。**")
 
     print("\n[1] 文件斷言逐條驗證")
     for a in cfg.get("assertions", []):
@@ -153,6 +227,12 @@ def run_audit(cfg, boards, models):
     if not cfg.get("assertions"):
         print("  （尚未定義任何斷言 —— 文件寫到哪，斷言就要補到哪）")
 
+    print("\n[1.5] 元件模型（pin-existence 與 package 解析）")
+    out = []
+    f, p = model_check(cfg, boards, models, out)
+    stats["model_fail"], stats["model_pending"] = f, p
+    print("\n".join(out))
+
     print("\n[2] refdes 命名規則 vs 實際佈件")
     out = []
     for rule in cfg.get("role_rules", []):
@@ -171,18 +251,34 @@ def run_audit(cfg, boards, models):
         other = sorted([r for r in no_bom if r not in actives
                         and not nl.is_passive(r) and not nl.is_mech(r)], key=refkey)
         bom_only = sorted([r for r in bom.ref if r not in nl.parts], key=refkey)
-        stats["dni"][k] = act
-        print("  [%s] BOM 類型: %s" % (k, bom.kind))
+        stats["absent"][k] = act
+        stats["bom_dups"][k] = bom.dups
+        stats["bom_ranges"][k] = bom.suspect_ranges
+        print("  [%s] BOM 範圍: %s" % (k, bom.scope))
         print("       netlist 有 / BOM 無: active %d, passive %d, 機構 %d, 其他 %d"
               % (len(act), len(pas), len(mech), len(other)))
         if act:
-            print("         -> active 未貼件 (真 DNI): %s" % ", ".join(act[:30]))
+            print("         -> active %s: %s"
+                  % (bom.absent_label(), ", ".join(act[:30])))
+            if not bom.scope_supports_dni():
+                print("            （scope=%s，**不得稱為真 DNI**）" % bom.scope)
         if other:
             print("         -> 未分類，請人工判斷: %s" % ", ".join(other[:30]))
         if mech:
             print("         -> 機構/測試點 %d 顆：若 BOM 是 SMT BOM 則屬正常" % len(mech))
         print("       BOM 有 / netlist 無: %d %s"
               % (len(bom_only), ", ".join(bom_only[:15])))
+        if bom.dups:
+            print("       !! 重複 refdes %d 筆（後列不再靜默覆蓋前列）："
+                  % len(bom.dups))
+            for rd, rows in sorted(bom.dups.items())[:8]:
+                print("          %-9s 列 %s" % (rd, ",".join(str(x) for x in rows)))
+        if bom.suspect_ranges:
+            print("       !! 疑似 refdes 範圍 %d 筆（預設**不展開**，"
+                  "要展開請設 expand_ranges）：%s"
+                  % (len(bom.suspect_ranges),
+                     ", ".join("%s@列%s" % (c, r)
+                               for c, r in bom.suspect_ranges[:6])))
 
     print("\n[4] 單腳（懸空）網路")
     for k, (nl, _b) in boards.items():
@@ -195,4 +291,13 @@ def run_audit(cfg, boards, models):
         print("  [%s] 共 %d 條" % (k, len(sp)))
         for fp, lst in sorted(owners.items(), key=lambda x: -len(x[1])):
             print("       %-34s %3d 支腳  e.g. %s" % (fp, len(lst), ", ".join(lst[:4])))
+
+    stats["ok"] = not (stats["parser_fail"] or stats["assert_fail"]
+                       or stats["model_fail"] or stats["role_bad"]
+                       or any(stats["bom_dups"].values()))
+    print("\n" + "-" * 78)
+    print("稽核結果：%s" % ("PASS" if stats["ok"] else "**FAIL**"))
+    if stats["model_pending"]:
+        print("待辦 %d 項（不是錯誤，但也**不算通過**）：%s"
+              % (len(stats["model_pending"]), "；".join(stats["model_pending"][:5])))
     return stats

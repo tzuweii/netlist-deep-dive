@@ -2,7 +2,11 @@ __pycache__/
 *.pyc
 export/
 REVIEW.md
+MANIFEST.md
+MISSING.md
+verified-pins.csv
 ndd.json
+models.json
 datasheets/
 *.asc
 *.xlsx

@@ -14,6 +14,10 @@
 ⚠️ 本模組附帶 `selfcheck()`：用**完全獨立的邏輯**重數一次原始檔，比對 parser
    有沒有靜靜吞掉幾行。這是整條工具鏈最底層的假設——parser 若漏讀，上面所有
    結論都不成立而且不會有任何跡象。每次稽核都應該重跑。
+
+⚠️ `pins()` 回傳的是**已接腳位**，不是元件總腳數——未接（NC）腳不出現在任何
+   net，就永遠不會進 `pinmap`。所以 `len(nl.pins(rd))` 系統性低估，**不得**用來
+   反推封裝（會穩定偏向較小的封裝）。它只能用來「排除」候選，不能「證明」。
 """
 import fnmatch
 import io
@@ -28,6 +32,10 @@ class Netlist(object):
         self.parts = {}       # refdes -> footprint
         self.nets = {}        # net    -> [(refdes, pin), ...]
         self.pinmap = {}      # refdes -> {pin: net}
+        # ⚠️ 同一支腳出現在兩條 net（設計短路，或匯出錯誤）時，pinmap 只能留一個
+        #    值。舊版把被覆蓋的那條靜默丟掉，而 selfcheck 比的兩個數字**都**仍然
+        #    相等，所以會回報 PASS。這裡把覆蓋事件記下來，交給 selfcheck 判 FAIL。
+        self.dup_pins = {}    # (refdes, pin) -> [net, ...]
         self._parse()
 
     def _parse(self):
@@ -61,7 +69,12 @@ class Netlist(object):
                             continue
                         refdes, pin = tok.rsplit(".", 1)
                         self.nets[cur].append((refdes, pin))
-                        self.pinmap.setdefault(refdes, {})[pin] = cur
+                        prev = self.pinmap.setdefault(refdes, {}).get(pin)
+                        if prev is not None and prev != cur:
+                            d = self.dup_pins.setdefault((refdes, pin), [prev])
+                            if cur not in d:
+                                d.append(cur)
+                        self.pinmap[refdes][pin] = cur
 
     # ---- 查詢 -------------------------------------------------------------
     def pins(self, refdes):
@@ -149,15 +162,23 @@ class Netlist(object):
                 else:
                     stray.append("區塊外:" + s)
         got_pins = sum(len(v) for v in self.nets.values())
+        # ⚠️ 第三個計數，缺它就抓不到「一支腳掛兩條 net」：pin_tokens 與 got_pins
+        #    在該情境下**都會**是 2，只有 pinmap 少了一筆。
+        mapped_pins = sum(len(v) for v in self.pinmap.values())
+        dup = ["%s.%s -> %s" % (rd, p, " / ".join(nets))
+               for (rd, p), nets in sorted(self.dup_pins.items())]
         ghost = [r for r in self.pinmap if r not in self.parts]
         ok = (part_lines == len(self.parts) and len(sig_names) == len(self.nets)
-              and pin_tokens == got_pins and len(sig_names) == len(set(sig_names))
-              and not ghost and not stray)
+              and pin_tokens == got_pins and pin_tokens == mapped_pins
+              and len(sig_names) == len(set(sig_names))
+              and not dup and not ghost and not stray)
         return {
             "ok": ok,
             "parts": (part_lines, len(self.parts)),
             "nets": (len(sig_names), len(self.nets)),
             "pins": (pin_tokens, got_pins),
+            "mapped": (pin_tokens, mapped_pins),
+            "dup_pins": dup,
             "dup_signal": len(sig_names) - len(set(sig_names)),
             "ghost": ghost,
             "stray": stray,

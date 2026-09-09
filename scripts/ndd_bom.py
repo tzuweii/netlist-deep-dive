@@ -2,17 +2,21 @@
 # -*- coding: utf-8 -*-
 """PCBA BOM (.xlsx) 解析器（通用）。
 
-核心用途：BOM 的 refdes 欄（常見欄名 `Part Reference`）展開後即得
-`refdes -> Value / Manufacturer_PN` 的查表。
+核心用途：BOM 的 refdes 欄展開後即得 `refdes -> Value / Manufacturer_PN` 查表。
 
-⚠️ **netlist 有、但該欄沒有的 refdes 就是未貼件 (DNI)**——這是判斷 DNI 的唯一
-   可靠方法，不要用「BOM 數量比 netlist 少」去猜是哪幾顆。
+⚠️ **標題列位置各檔不同**，所以用「哪一列含有 refdes 欄名」自動偵測，
+   **絕不寫死列號或欄號**。
 
-⚠️ **標題列位置各檔不同**（有的在第 1 列、有的在第 2 列，欄位順序也不同），
-   所以這裡用「哪一列含有 refdes 欄名」自動偵測，**絕不寫死列號或欄號**。
+⚠️ **BOM 範圍決定能不能說「未貼件」**。舊版把「netlist 有、BOM 無」一律當成
+   DNI，但那只對「完整且會列出 DNP 列」的 BOM 成立。拿到 SMT BOM 或某個變體
+   時，缺件只代表**不在這份 BOM 的範圍內**。用 `scope` 區分：
 
-⚠️ **BOM 類型會影響 DNI 判讀**：若拿到的是 SMT BOM，連接器、測試點、鎖孔等
-   非 SMT 件本來就不在裡面，不是未貼件。用 `kind` 欄位標註，稽核時分開報。
+     complete  —— 才可標為候選 DNI
+     smt_only / variant / unknown —— 只能標 `bom-absent:<scope>`
+
+⚠️ **重複 refdes 不得靜默覆蓋**。舊版後列直接蓋掉前列，而 DNI 對帳與
+   `not_stuffed` 斷言全都建立在 `of()` 上——覆蓋掉的那列可能正是關鍵資訊。
+   衝突的 refdes 一律回傳 `AMBIGUOUS`，並讓相關斷言 **FAIL 而不是靜默跳過**。
 """
 import io
 import os
@@ -23,7 +27,6 @@ try:
 except ImportError:                                  # pragma: no cover
     openpyxl = None
 
-# 常見的 refdes 欄名（大小寫不拘）。找不到時可用 --ref-col 指定。
 REF_COL_CANDIDATES = [
     "part reference", "reference", "references", "designator", "designators",
     "refdes", "ref des", "part references", "location",
@@ -32,26 +35,67 @@ PN_COL_CANDIDATES = ["manufacturer_pn", "manufacturer pn", "mfg pn", "mpn",
                      "manufacturer part number", "part number", "name"]
 VAL_COL_CANDIDATES = ["value", "comment", "description"]
 
+SCOPES = ("complete", "smt_only", "variant", "unknown")
+
 _SPLIT_RX = re.compile(r"[,\s;]+")
+# 疑似範圍：R1-R5 / R1-5。⚠️ **只警告不展開** —— `J1-1` 也可能是合法 refdes，
+# 自動展開是猜測，違反「不確定就標記，不要補完」。
+_RANGE_RX = re.compile(r"^([A-Za-z]+)(\d+)\s*-\s*([A-Za-z]*)(\d+)$")
+
+
+class _Ambiguous(object):
+    """同一 refdes 在 BOM 出現多列且內容衝突。**不是資料，是待解事項。**"""
+
+    def __init__(self, refdes=None, rows=None):
+        self.refdes = refdes
+        self.rows = rows or []
+
+    def __repr__(self):
+        return "<AMBIGUOUS %s @ rows %s>" % (
+            self.refdes, ",".join(str(r) for r in self.rows))
+
+    def __bool__(self):
+        return False                 # 不可被當成「有找到」
+
+    __nonzero__ = __bool__
+
+
+AMBIGUOUS = _Ambiguous()
+
+
+def is_ambiguous(x):
+    return isinstance(x, _Ambiguous)
 
 
 class Bom(object):
-    def __init__(self, path, sheet=None, ref_col=None, kind=""):
+    def __init__(self, path, sheet=None, ref_col=None, scope="unknown",
+                 expand_ranges=False):
         if openpyxl is None:
             raise RuntimeError("需要 openpyxl：pip install openpyxl")
+        if scope not in SCOPES:
+            raise ValueError(
+                "bom_scope 必須是 %s 之一（目前 %r）。舊欄位 `bom_kind` 已改名，"
+                "對應：SMT BOM -> smt_only、完整 BOM -> complete、未標註 -> unknown。"
+                "**不得預設為 complete** —— 那會把未知範圍的缺件誤報成真 DNI。"
+                % ("／".join(SCOPES), scope))
         self.path = path
         self.name = os.path.basename(path)
-        self.kind = kind or "未標註"
+        self.scope = scope
+        self.expand_ranges = expand_ranges
         self.rows = []
         self.ref = {}
+        self.dups = {}               # refdes -> [列號, ...]
+        self.suspect_ranges = []     # (cell, 列號)
         self.header_row = None
         self.header = []
         self.ref_col_name = None
+        self.sheet_name = None
         self._parse(sheet, ref_col)
 
     def _parse(self, sheet, ref_col):
         wb = openpyxl.load_workbook(self.path, data_only=True, read_only=True)
         ws = wb[sheet] if sheet else wb[wb.sheetnames[0]]
+        self.sheet_name = ws.title
         wanted = [ref_col.lower()] if ref_col else REF_COL_CANDIDATES
         header = None
         idx = None
@@ -69,8 +113,12 @@ class Bom(object):
             d = {h: v for h, v in zip(header, vals) if h}
             d["_row"] = r
             self.rows.append(d)
-            for rd in self.expand(vals[idx] if idx < len(vals) else ""):
-                self.ref[rd] = d
+            cell = vals[idx] if idx < len(vals) else ""
+            for rd in self.expand(cell, r):
+                if rd in self.ref and self.ref[rd].get("_row") != r:
+                    self.dups.setdefault(rd, [self.ref[rd]["_row"]]).append(r)
+                else:
+                    self.ref[rd] = d
         wb.close()
         if header is None:
             raise ValueError(
@@ -78,11 +126,24 @@ class Bom(object):
                 % (self.name, ", ".join(wanted)))
         self.header = header
 
-    @staticmethod
-    def expand(cell):
+    def expand(self, cell, row=None):
         if not cell:
             return []
-        return [t for t in _SPLIT_RX.split(cell.strip()) if t]
+        out = []
+        for t in _SPLIT_RX.split(cell.strip()):
+            if not t:
+                continue
+            m = _RANGE_RX.match(t)
+            if m and (not m.group(3) or m.group(3) == m.group(1)):
+                self.suspect_ranges.append((t, row))
+                if self.expand_ranges:
+                    lo, hi = int(m.group(2)), int(m.group(4))
+                    if lo <= hi:
+                        out.extend("%s%d" % (m.group(1), i)
+                                   for i in range(lo, hi + 1))
+                        continue
+            out.append(t)
+        return out
 
     def _pick(self, d, cands):
         low = {k.lower(): k for k in d if isinstance(k, str)}
@@ -92,25 +153,44 @@ class Bom(object):
         return ""
 
     def of(self, refdes):
+        if refdes in self.dups:
+            return _Ambiguous(refdes, self.dups[refdes])
         return self.ref.get(refdes)
 
     def pn(self, refdes):
-        d = self.ref.get(refdes)
+        d = self.of(refdes)
+        if is_ambiguous(d):
+            return d
         return self._pick(d, PN_COL_CANDIDATES) if d else None
 
     def value(self, refdes):
-        d = self.ref.get(refdes)
+        d = self.of(refdes)
+        if is_ambiguous(d):
+            return d
         return self._pick(d, VAL_COL_CANDIDATES) if d else None
+
+    def _pn_str(self, refdes):
+        p = self.pn(refdes)
+        return "" if (p is None or is_ambiguous(p)) else p
 
     def count_pn(self, pn):
         pn = pn.upper()
-        return sum(1 for r in self.ref if (self.pn(r) or "").upper() == pn)
+        return sum(1 for r in self.ref if self._pn_str(r).upper() == pn)
 
     def refdes_of_pn(self, pn):
         pn = pn.upper()
-        return sorted(r for r in self.ref if (self.pn(r) or "").upper() == pn)
+        return sorted(r for r in self.ref if self._pn_str(r).upper() == pn)
+
+    def absent_label(self):
+        """netlist 有、BOM 無時該怎麼稱呼它 —— 由 scope 決定，不得一律叫 DNI。"""
+        return "候選 DNI" if self.scope == "complete" else "bom-absent:%s" % self.scope
+
+    def scope_supports_dni(self):
+        return self.scope == "complete"
 
     def __repr__(self):
-        return "<Bom %s [%s]: %d items / %d refdes (標題列 %d, refdes 欄 '%s')>" % (
-            self.name, self.kind, len(self.rows), len(self.ref),
-            self.header_row, self.ref_col_name)
+        return ("<Bom %s [%s] sheet=%s: %d items / %d refdes"
+                " (標題列 %d, refdes 欄 '%s', 重複 %d, 疑似範圍 %d)>"
+                % (self.name, self.scope, self.sheet_name, len(self.rows),
+                   len(self.ref), self.header_row, self.ref_col_name,
+                   len(self.dups), len(self.suspect_ranges)))

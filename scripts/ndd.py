@@ -14,7 +14,9 @@
     python ndd.py pinfn LMX2594 8             # 查某腳功能（抽 datasheet 原文並快取）
     python ndd.py datasheets                  # 盤點/下載 datasheet，產生 MISSING.md
     python ndd.py review                      # 產生人工複驗清單 REVIEW.md
-    python ndd.py models                      # 列出已查證的腳位模型
+    python ndd.py models                      # 列出已查證的元件模型
+    python ndd.py manifest                    # 輸入檔完整 SHA-256 + 工具版本
+    python ndd.py coverage                    # per-MPN 三源覆蓋狀況
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
 
@@ -37,8 +39,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ndd_audit import run_audit                                    # noqa: E402
 from ndd_bom import Bom                                            # noqa: E402
 from ndd_graph import Fabric                                       # noqa: E402
-from ndd_models import describe, load_models, pairs_for            # noqa: E402
+from ndd_bom import is_ambiguous                                   # noqa: E402
+from ndd_models import (ModelError, describe, load_models,          # noqa: E402
+                        missing_pins, select_model, transfer_for)
 from ndd_pads import Netlist, refkey                               # noqa: E402
+import ndd_confidence as C                                         # noqa: E402
+import ndd_graph                                                   # noqa: E402
 import ndd_pinfn                                                   # noqa: E402
 
 CONFIG_NAME = "ndd.json"
@@ -80,9 +86,17 @@ class Project(object):
     def load(self, key):
         if key not in self._cache:
             b = self.cfg["boards"][key]
+            if "bom_kind" in b and "bom_scope" not in b:
+                raise SystemExit(
+                    "board '%s' 仍使用已改名的 `bom_kind`。請改為 `bom_scope`，"
+                    "對應：SMT BOM -> smt_only、完整 BOM -> complete、"
+                    "未標註 -> unknown。**不得預設 complete**——那會把未知範圍"
+                    "的缺件誤報成真 DNI。" % key)
             nl = Netlist(os.path.join(self.dir, b["asc"]))
-            bom = Bom(os.path.join(self.dir, b["bom"]), ref_col=b.get("ref_col"),
-                      kind=b.get("bom_kind", ""))
+            bom = Bom(os.path.join(self.dir, b["bom"]), sheet=b.get("sheet"),
+                      ref_col=b.get("ref_col"),
+                      scope=b.get("bom_scope", "unknown"),
+                      expand_ranges=bool(b.get("expand_ranges")))
             self._cache[key] = (nl, bom)
         return self._cache[key]
 
@@ -90,9 +104,13 @@ class Project(object):
         return {k: self.load(k) for k in self.board_keys(which)}
 
     def fabric(self):
-        return Fabric(self.all_boards(), [tuple(m) for m in self.cfg.get("mates", [])],
+        return Fabric(self.all_boards(),
+                      [tuple(m) for m in self.cfg.get("mates", [])],
                       self.models, self.cfg.get("power_net_regex"),
-                      self.cfg.get("net_normalize"))
+                      self.cfg.get("net_normalize"),
+                      mate_map=self.cfg.get("mate_map"),
+                      endpoints=self.cfg.get("endpoints"),
+                      part_package=self.cfg.get("part_package"))
 
     def label(self, key):
         return self.cfg["boards"][key].get("label", key)
@@ -100,8 +118,10 @@ class Project(object):
 
 def pn_of(bom, refdes):
     d = bom.of(refdes)
+    if is_ambiguous(d):
+        return "!! BOM 多列衝突（列 %s）" % ",".join(str(x) for x in d.rows)
     if d is None:
-        return "(未在 BOM refdes 欄中 -> DNI)"
+        return "(未在 BOM refdes 欄中 -> %s)" % bom.absent_label()
     pn, val = bom.pn(refdes) or "", bom.value(refdes) or ""
     return "%s | %s" % (pn, val) if val and val != pn else (pn or val)
 
@@ -144,7 +164,8 @@ def cmd_init(args):
         if conf != "OK":
             low_conf.append(key)
         boards[key] = {"label": os.path.splitext(a)[0], "asc": a, "bom": best,
-                       "bom_kind": "", "ref_col": None}
+                       "bom_scope": "unknown", "sheet": None, "ref_col": None,
+                       "expand_ranges": False}
         print("  %-14s parts %5d / signals %5d" % (key, len(nl.parts), len(nl.nets)))
         print("       -> BOM %-58s refdes 命中率 %.0f%% (次佳 %.0f%%)  %s"
               % (best or "(無)", ratio * 100, second * 100, conf))
@@ -152,6 +173,10 @@ def cmd_init(args):
         "project": os.path.basename(os.path.dirname(d)) or "unnamed",
         "boards": boards,
         "mates": [],
+        # ⚠️ 未出現在骨架裡的欄位，使用者不會知道它存在 —— 一律寫出空殼。
+        "mate_map": {},
+        "part_package": {},
+        "endpoints": {},
         "power_net_regex": r"^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\d+V\d+.*)$",
         "net_normalize": [],
         "trace": {"start": [], "slot_pattern": ""},
@@ -168,8 +193,14 @@ def cmd_init(args):
     if low_conf:
         print("\n⚠️ 這幾塊板的 BOM 配對信心不足，**請人工確認 ndd.json 的 bom 欄**：%s"
               % ", ".join(low_conf))
-    print("接著要人工補：mates（連接器對接）、net_normalize、trace.start、"
-          "以及每塊板的 bom_kind（是 SMT BOM 還是完整 BOM，影響 DNI 判讀）")
+    print("接著要人工補：")
+    print("  boards[*].bom_scope  complete / smt_only / variant / unknown")
+    print("                       **只有 complete 才能把缺件稱為 DNI**")
+    print("  mates / mate_map     對接關係；mate_map 是已批准的腳位對映，")
+    print("                       未批准時 trace 仍可跑，但每列會帶 mate:unapproved")
+    print("  part_package         只在 datasheet 多封裝欄且會改變答案時才需要")
+    print("  endpoints            refdes 或 MPN -> terminal / stateful / unknown_stop")
+    print("  net_normalize / trace.start")
 
 
 def cmd_pins(args, pj):
@@ -181,13 +212,22 @@ def cmd_pins(args, pj):
         for b in hits:
             nl, bom = pj.load(b)
             fp = nl.parts[refdes]
-            model, pairs = pairs_for(pj.models, fp, bom.pn(refdes) or "",
-                                     len(nl.pins(refdes)))
+            pn = bom.pn(refdes)
+            pn = "" if is_ambiguous(pn) else (pn or "")
+            pkg = ((pj.cfg.get("part_package") or {}).get("%s:%s" % (b, refdes))
+                   or (pj.cfg.get("part_package") or {}).get(pn))
+            model, edges, cav = transfer_for(pj.models, fp, pn,
+                                             len(nl.pins(refdes)), pkg)
             print("== %s  [%s]" % (refdes, pj.label(b)))
             print("   footprint : %s" % fp)
             print("   BOM       : %s" % pn_of(bom, refdes))
-            if pairs:
-                print("   導通模型  : %s（%d 組）" % (model, len(pairs)))
+            if edges:
+                print("   transfer  : %s（%d 條有向邊）" % (model, len(edges)))
+                for a_, b_, d_, _e in edges:
+                    print("               %s %s %s"
+                          % (a_, "->" if d_ == "forward" else "<->", b_))
+            if cav:
+                print("   caveats   : %s" % C.render(cav))
             pins = nl.pins(refdes)
             w = max([len(p) for p in pins] or [1])
             for p, net in pins.items():
@@ -246,15 +286,27 @@ def cmd_export(args, pj):
         with io.open(path, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
             w.writerow(["refdes", "pin", "net", "footprint", "part_number",
-                        "value", "class", "stuffed", "net_pin_count"])
+                        "value", "class", "stuffed", "bom_scope",
+                        "net_pin_count"])
             for rd in sorted(nl.parts, key=refkey):
                 d = bom.of(rd)
+                if is_ambiguous(d):
+                    stuffed = "AMBIGUOUS"
+                elif d:
+                    stuffed = "Y"
+                else:
+                    # ⚠️ 「BOM 沒有」不等於「板上沒有」——要看 BOM 範圍
+                    stuffed = "N" if bom.scope_supports_dni() else "UNKNOWN"
+                pn = bom.pn(rd)
+                val = bom.value(rd)
                 cls = ("passive" if nl.is_passive(rd)
                        else "mech" if nl.is_mech(rd) else "active")
                 pins = nl.pins(rd) or {"": ""}
                 for p, net in pins.items():
-                    w.writerow([rd, p, net, nl.parts[rd], bom.pn(rd) or "",
-                                bom.value(rd) or "", cls, "Y" if d else "N",
+                    w.writerow([rd, p, net, nl.parts[rd],
+                                "" if is_ambiguous(pn) else (pn or ""),
+                                "" if is_ambiguous(val) else (val or ""),
+                                cls, stuffed, bom.scope,
                                 len(nl.net(net)) if net else ""])
         print("寫出 %s  (%d parts / %d signals)" % (path, len(nl.parts), len(nl.nets)))
 
@@ -285,6 +337,12 @@ def cmd_trace(args, pj):
         raise SystemExit("ndd.json 的 trace.start 是空的，例如 "
                          '[{"board":"ecu","conn":"J902","rail":"P"}]')
     fab = pj.fabric()
+    unapproved = [k for k, v in fab.mate_status.items() if v != "approved"]
+    if unapproved:
+        print("!! 有 %d 組對接尚未批准腳位對映（ndd.json 的 mate_map）。" % len(unapproved))
+        print("   trace 仍會跑，但這些路徑帶 mate:unapproved —— 它們是**候選路徑**，")
+        print("   不是已確認的線束／板對板對接結論。")
+        print("")
     slot_rx = re.compile(tcfg.get("slot_pattern") or "$^")
     rows = []
     for st in starts:
@@ -295,47 +353,77 @@ def cmd_trace(args, pj):
                 continue
             if args.signal and args.signal.upper() not in net.upper():
                 continue
-            far = [(bb, rb) for (ba, ra, bb, rb) in fab.mates if ba == b and ra == conn]
-            far += [(ba, ra) for (ba, ra, bb, rb) in fab.mates if bb == b and rb == conn]
+            base = dict(rail=st.get("rail", ""), signal=net,
+                        start="%s.%s" % (conn, pin))
             # 第一段：走到中繼（slot）連接器
             mids = fab.trace((b, conn, pin),
-                             lambda n: n[0] == b and slot_rx.match(n[1] or ""))
+                             stop_fn=lambda n: n[0] == b and slot_rx.match(n[1] or ""))
             if not mids:
-                rows.append(dict(rail=st.get("rail", ""), signal=net, slot="",
-                                 start="%s.%s" % (conn, pin), mid="", far_pin="",
-                                 far_net="(未到達中繼連接器)", n_loads=0, loads="",
-                                 hops=""))
+                rows.append(dict(base, slot="", mid="", far_pin="",
+                                 far_net="(未到達中繼連接器)", n_loads=0,
+                                 loads="", stops="", hops="",
+                                 endpoint_kind="", gating="",
+                                 caveats="", confidence=C.UNKNOWN))
                 continue
-            for (mb, mrd, mpin), path in sorted(
+            for (mb, mrd, mpin), (path, _ep) in sorted(
                     mids.items(), key=lambda x: (x[0][1], x[0][2])):
-                tgt = next(((bb, rb) for (ba, ra, bb, rb) in fab.mates
-                            if ba == mb and ra == mrd), None)
-                if tgt is None:
-                    continue
-                tb, trd = tgt
-                ends = fab.trace((tb, trd, mpin), fab.is_terminal, max_depth=6)
-                fnet = fab.nl[tb].pin_net(trd, mpin)
-                loads = sorted("%s.%s" % (rd, p) for _b, rd, p in ends)
-                # slot 索引：slot_pattern 若有 capture group 就用它，否則用整個 refdes
                 sm = slot_rx.match(mrd)
                 slot = sm.group(1) if (sm and sm.groups()) else mrd
-                rows.append(dict(
-                    rail=st.get("rail", ""), signal=net,
-                    slot=slot, start="%s.%s" % (conn, pin),
-                    mid="%s.%s" % (mrd, mpin), far_pin="%s.%s" % (trd, mpin),
-                    far_net=fnet or "", n_loads=len(loads), loads=" ".join(loads),
-                    hops=fab.hop_string(path)))
+                partners = fab.mate_partners(mb, mrd)
+                if not partners:
+                    # ⚠️ 舊版在這裡 `continue`，整條訊號從 CSV 靜默消失。
+                    rows.append(dict(
+                        base, slot=slot, mid="%s.%s" % (mrd, mpin), far_pin="",
+                        far_net="(mate 未宣告)", n_loads=0, loads="", stops="",
+                        hops=fab.hop_string(path), endpoint_kind="",
+                        gating=fab.path_gating(path),
+                        caveats=C.render(fab.path_caveats(path, ["mate:missing"])),
+                        confidence=C.confidence_of(
+                            fab.path_caveats(path, ["mate:missing"]))))
+                    continue
+                for tb, trd in partners:
+                    ends = fab.trace((tb, trd, mpin), max_depth=6)
+                    fnet = fab.nl[tb].pin_net(trd, mpin)
+                    loads, stops, cav, gat, kinds = [], [], set(), [], set()
+                    for (eb, erd, ep_), (epath, ep) in sorted(ends.items()):
+                        kind, reason, ecav = ep
+                        tag = "%s.%s" % (erd, ep_)
+                        if kind in ndd_graph.EP_IN_LOADS:
+                            loads.append(tag)
+                        else:
+                            stops.append("%s(%s)" % (tag, reason or kind))
+                        kinds.add(kind)
+                        cav |= fab.path_caveats(epath, ecav)
+                        gat.append(fab.path_gating(epath))
+                    cav |= fab.path_caveats(path)
+                    gat.append(fab.path_gating(path))
+                    rows.append(dict(
+                        base, slot=slot, mid="%s.%s" % (mrd, mpin),
+                        far_pin="%s.%s" % (trd, mpin), far_net=fnet or "",
+                        n_loads=len(loads), loads=" ".join(sorted(loads)),
+                        stops=" ".join(sorted(stops)),
+                        endpoint_kind=";".join(sorted(kinds)),
+                        gating=C.worst_gating(gat),
+                        caveats=C.render(cav), confidence=C.confidence_of(cav),
+                        hops=fab.hop_string(path)))
 
     if args.signal:
         shown = 0
         for r in rows:
             if r["slot"] not in ("", "1", "101") and shown:
                 continue
-            print("\n%-22s rail %s  slot %s" % (r["signal"], r["rail"], r["slot"]))
+            print("")
+            print("%-22s rail %s  slot %s" % (r["signal"], r["rail"], r["slot"]))
             print("   起點  : %s" % r["start"])
             print("   hops  : %s" % r["hops"])
             print("   -> %s = %s -> %s" % (r["mid"], r["far_pin"], r["far_net"]))
             print("   負載  : %d 個  %s" % (r["n_loads"], r["loads"][:120]))
+            if r["stops"]:
+                print("   停點  : %s" % r["stops"][:120])
+            print("   端點  : %s | gating %s | confidence %s"
+                  % (r["endpoint_kind"], r["gating"], r["confidence"]))
+            if r["caveats"]:
+                print("   caveat: %s" % r["caveats"])
             shown += 1
         return rows
 
@@ -344,7 +432,8 @@ def cmd_trace(args, pj):
         os.makedirs(out)
     path = os.path.join(out, "signal_chain.csv")
     cols = ["rail", "signal", "slot", "start", "hops", "mid", "far_pin",
-            "far_net", "n_loads", "loads"]
+            "far_net", "n_loads", "loads", "stops", "endpoint_kind",
+            "gating", "caveats", "confidence"]
     with io.open(path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
         w.writeheader()
@@ -354,6 +443,21 @@ def cmd_trace(args, pj):
     print("  走到終端腳: %d 列 / 未到達: %d 列"
           % (sum(1 for r in rows if r["n_loads"]),
              sum(1 for r in rows if not r["n_loads"])))
+    for lvl in (C.CONFIRMED, C.CAVEATED, C.UNKNOWN):
+        n = sum(1 for r in rows if r["confidence"] == lvl)
+        if n:
+            print("  confidence %-10s %d 列" % (lvl, n))
+
+    # ---- hint graph：另一份輸出，**不可被 BFS 使用** ----
+    hints = fab.collect_hints()
+    hp = os.path.join(out, "topology_hint.csv")
+    hcols = ["board", "refdes", "pin", "net", "mpn", "relation", "effect", "source"]
+    with io.open(hp, "w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=hcols)
+        w.writeheader()
+        for r in hints:
+            w.writerow({c: r.get(c, "") for c in hcols})
+    print("寫出 %s  (%d 列；功能說明，**不是連通**)" % (hp, len(hints)))
     return rows
 
 
@@ -460,45 +564,198 @@ def cmd_datasheets(args, pj):
     print("\n缺 %d 筆，已寫出 %s" % (len(missing), mp))
 
 
+# ---------------------------------------------------------------- manifest --
+def cmd_manifest(args, pj):
+    """輸入檔的完整 SHA-256 + 工具版本。
+
+    ⚠️ `ndd.json` 也要入帳 —— 它含 mates / mate_map / net_normalize /
+       power_net_regex / assertions / part_package / endpoints，每一項都直接
+       改變結論。工具版本同理：工具邏輯本身會改變結論。
+    """
+    import datetime
+    items = []
+
+    def add(kind, path):
+        if os.path.exists(path):
+            items.append((kind, os.path.relpath(path, pj.dir),
+                          ndd_pinfn.sha256(path)))
+
+    for k in pj.board_keys("all"):
+        b = pj.cfg["boards"][k]
+        add("netlist", os.path.join(pj.dir, b["asc"]))
+        add("bom", os.path.join(pj.dir, b["bom"]))
+    add("config", pj.path)
+    add("models", os.path.join(pj.dir, "models.json"))
+    ddir = os.path.join(pj.dir,
+                        (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
+    if os.path.isdir(ddir):
+        for f in sorted(os.listdir(ddir)):
+            if f.lower().endswith(".pdf"):
+                add("datasheet", os.path.join(ddir, f))
+
+    try:
+        rev = subprocess.check_output(
+            ["git", "-C", os.path.dirname(os.path.abspath(__file__)),
+             "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.PIPE).decode().strip()
+    except Exception:
+        rev = "(not a git work tree)"
+
+    lines = ["# 輸入 manifest", "",
+             "產生時間：%s" % datetime.date.today().isoformat(),
+             "工具版本：%s" % rev, ""]
+    for k in pj.board_keys("all"):
+        b = pj.cfg["boards"][k]
+        lines.append("- board `%s`：bom_scope=%s, sheet=%s"
+                     % (k, b.get("bom_scope", "unknown"),
+                        b.get("sheet") or "(第一個)"))
+    lines += ["", "| 種類 | 檔案 | SHA-256 |", "|---|---|---|"]
+    for kind, rel, sha in items:
+        lines.append("| %s | `%s` | `%s` |" % (kind, rel, sha))
+    txt = "\n".join(lines) + "\n"
+    # ⚠️ manifest 產物本身不入帳，避免 hash 自我指涉
+    out = os.path.join(pj.dir, "MANIFEST.md")
+    with io.open(out, "w", encoding="utf-8") as fh:
+        fh.write(txt)
+    print(txt)
+    print("寫出 %s（共 %d 個輸入檔；本檔自身不入帳）" % (out, len(items)))
+    return items
+
+
+# ---------------------------------------------------------------- coverage --
+def _ds_present(pn, have):
+    key = re.sub(r"[^a-z0-9]", "", (pn or "").split(",")[0].lower())[:6]
+    return bool(key) and any(key in h for h in have)
+
+
+def cmd_coverage(args, pj):
+    """per-MPN 的三源覆蓋狀況。**不做無人維護的 per-pin 矩陣。**"""
+    _cp, cache, _mig = ndd_pinfn.load_cache(pj.dir)
+    locked = {}
+    for r in cache:
+        if r.get("resolved_by") in ndd_pinfn.RESOLVED_OK:
+            k = r["part"].upper()
+            locked[k] = locked.get(k, 0) + 1
+    ddir = os.path.join(pj.dir,
+                        (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
+    have = [re.sub(r"[^a-z0-9]", "", f.lower())
+            for f in os.listdir(ddir)] if os.path.isdir(ddir) else []
+    eps = pj.cfg.get("endpoints") or {}
+    part_pkg = pj.cfg.get("part_package") or {}
+
+    agg = {}
+    for k in pj.board_keys(args.board):
+        nl, bom = pj.load(k)
+        for rd in nl.actives():
+            pn = bom.pn(rd)
+            amb = is_ambiguous(pn)
+            pn = "" if amb else (pn or "")
+            key = pn or "(無 MPN)"
+            e = agg.setdefault(key, {"n": 0, "bom": "無", "scope": bom.scope,
+                                     "state": set(), "todo": set()})
+            e["n"] += 1
+            if amb:
+                e["bom"] = "ambiguity"
+                e["todo"].add("BOM 衝突")
+            elif bom.of(rd) is not None:
+                e["bom"] = "有"
+            else:
+                e["todo"].add("BOM 缺(scope=%s)" % bom.scope)
+            pkg = part_pkg.get("%s:%s" % (k, rd)) or part_pkg.get(pn)
+            _name, m, cav = select_model(pj.models, nl.parts.get(rd, ""), pn, pkg)
+            declared = eps.get("%s:%s" % (k, rd)) or eps.get(pn)
+            if m is not None and not cav:
+                e["state"].add("modelled")
+            elif "package:unresolved" in cav:
+                e["state"].add("declared-unmodelled")
+                e["todo"].add("package")
+            elif cav:
+                e["state"].add("model_unusable")
+                e["todo"].add("model")
+            elif declared:
+                e["state"].add(declared)
+            else:
+                # ⚠️ 未宣告的穿越件會落在這裡。這是**預設值，不是結論**。
+                e["state"].add("unclassified")
+                e["todo"].add("endpoint 分類")
+            if not _ds_present(pn, have):
+                e["todo"].add("datasheet")
+
+    hdr = ("%-28s %4s %-10s %-9s %-4s %-6s %-22s %s"
+           % ("MPN", "顆", "BOM", "scope", "DS", "pinfn", "狀態", "待處理"))
+    print(hdr)
+    print("-" * 120)
+    for pn in sorted(agg):
+        e = agg[pn]
+        print("%-28s %4d %-10s %-9s %-4s %-6d %-22s %s"
+              % (pn[:28], e["n"], e["bom"], e["scope"],
+                 "有" if _ds_present(pn, have) else "無",
+                 locked.get(pn.upper(), 0),
+                 ",".join(sorted(e["state"]))[:22],
+                 ", ".join(sorted(e["todo"])) or "-"))
+    print("")
+    print("注：pinfn 欄只計 **package-locked** 的快取列；未鎖定的不算覆蓋")
+    print("    （否則等於把未解決的歧義洗成綠格）。")
+    print("    `unclassified` 是預設值，不是結論 —— 未宣告的穿越件會落在這裡。")
+    return agg
+
+
 # ------------------------------------------------------------------ review --
 REVIEW_TMPL = u"""# 人工複驗清單
 
 > 由 `ndd.py review` 產生。**這份清單上的每一項，工具都不能替你確認。**
 > 專案：{project}
 
+## 0. 三源覆蓋
+
+{coverage}
+
 ## A. 工具驗得到、且已通過的（不需複驗，列出供追溯）
 
 - parser 自我驗證：{parser}
 - 文件斷言：{apass} 條通過{afail}
+- 元件模型：{model}
 - 命名規則展開：{role}
 
 ## B. 必須人工複驗的
 
-### B1. 腳位模型（最高優先）
+### B1. 元件 transfer 模型（最高優先）
 追跡結果完全建立在這些模型上；模型錯 → 訊號鏈看起來合理但整張表是錯的。
 
+```
 {models}
+```
 
-- [ ] 上表每一筆的 `verified_against` 都真的翻過那一頁？
-- [ ] 有沒有用到**相近型號**的腳位當成同一顆？（例如 -Q1 / 不同封裝腳位不同）
+- [ ] 每條 transfer 邊的 `direction` 都真的翻過 datasheet？**單向元件不得雙向走。**
+- [ ] 每條邊的 `verified_against` 都真的翻過那一頁？
+- [ ] `package_basis` 是 `exact_table` 者，`package` 是否為腳位表的實際欄標題？
+- [ ] 有沒有用到**相近型號**的腳位當成同一顆？
 
 ### B2. 連接器對接
 {mates}
 
 - [ ] margin ≤ 4 的項目，是否已用 layout 或 continuity 確認？
 - [ ] 兩側同型（都是公頭）的對接，是否已取得線束圖？
+- [ ] **帶 `mate:unapproved` 的路徑是候選路徑，不是結論。** 是否已填 `mate_map`？
 
 ### B3. netlist 本身答不出來的
-- [ ] **netlist ≠ 實體板**：rework／飛線／換料都不在 `.asc` 裡。手上這片的 rework 紀錄查過了嗎？
+- [ ] **netlist ≠ 實體板**：rework／飛線／換料都不在 `.asc` 裡。
 - [ ] **layout 決定的量**（阻抗、插入損耗、耦合、串音）不能跨版本沿用。
-- [ ] **BOM 版本**：拿到的是哪一個 build 變體？是 SMT BOM 還是完整 BOM？
+- [ ] **BOM 範圍**：{scope}
 - [ ] **線束**：板間同軸／排線的對應關係不在任何 netlist 裡。
-- [ ] **未貼件 (DNI)**：{dni}
+- [ ] **BOM 缺件**：{absent}
 - [ ] **懸空（單腳）網路**：{floating}
 
-### B4. 文件裡的因果推論
-斷言只驗得到「數值與連線」。凡是「為什麼這樣設計」「這個 RC 造成 N ms 延遲」
-「這個拓樸是為了匹配路徑長度」之類的推論，**工具一律驗不到**，需實測或問設計者。
+### B4. 待指定的 package
+{pending}
+
+### B5. 未分類端點
+`unclassified` 是預設值，不是結論。未宣告的穿越件會被當成負載列出。
+
+- [ ] 跑 `ndd.py coverage`，把 `unclassified` 逐一歸類到 `endpoints`。
+
+### B6. 文件裡的因果推論
+斷言只驗得到「數值與連線」。凡是「為什麼這樣設計」之類的推論，**工具一律驗不到**。
 
 - [ ] 文件中每一句因果推論，都有標記為推論（⚠️）或附上佐證？
 """
@@ -506,26 +763,36 @@ REVIEW_TMPL = u"""# 人工複驗清單
 
 def cmd_review(args, pj):
     stats = run_audit(pj.cfg, pj.all_boards("all"), pj.models)
-    print("\n" + "=" * 78)
+    print("")
+    print("=" * 78)
     rep = pj.fabric().verify_mating(verbose=False) if pj.cfg.get("mates") else []
     mates = "\n".join(
-        "- `%s <-> %s`：最佳 **%s**（矛盾 %d、語意 %d），次佳 %s（%d）；margin **%d**。%s"
+        "- `%s <-> %s`：最佳 **%s**（矛盾 %d、語意 %d），次佳 %s（%d）；"
+        "margin **%d**；批准狀態 **%s**。%s"
         % (r["a"], r["b"], r["best"], r["best_bad"], r["best_match"],
-           r["second"], r["second_match"], r["margin"], r["kind"]) for r in rep
-    ) or "- （尚未設定 mates）"
-    models = "\n".join(
-        "- `%s`：%s" % (k, v["verified_against"]) for k, v in sorted(pj.models.items()))
+           r["second"], r["second_match"], r["margin"], r["status"], r["kind"])
+        for r in rep) or "- （尚未設定 mates）"
     txt = REVIEW_TMPL.format(
         project=pj.cfg.get("project", ""),
-        parser="全部通過" if not stats["parser_fail"] else "**失敗**: %s" % stats["parser_fail"],
+        coverage="跑 `ndd.py coverage` 取得 per-MPN 覆蓋表。",
+        parser=("全部通過" if not stats["parser_fail"]
+                else "**失敗**: %s" % stats["parser_fail"]),
         apass=stats["assert_pass"],
-        afail="" if not stats["assert_fail"] else "，**失敗 %d 條：%s**"
-              % (len(stats["assert_fail"]), "；".join(stats["assert_fail"][:5])),
-        role="0 筆未解釋的不符" if stats["role_bad"] == 0
-             else "**%d 筆未解釋的不符**" % stats["role_bad"],
-        models=models, mates=mates,
-        dni="; ".join("%s: %s" % (k, ", ".join(v) or "無") for k, v in stats["dni"].items()),
-        floating="; ".join("%s: %d 條" % (k, len(v)) for k, v in stats["floating"].items()))
+        afail=("" if not stats["assert_fail"] else "，**失敗 %d 條：%s**"
+               % (len(stats["assert_fail"]), "；".join(stats["assert_fail"][:5]))),
+        model=("全部通過" if not stats["model_fail"] else "**失敗 %d 項：%s**"
+               % (len(stats["model_fail"]), "；".join(stats["model_fail"][:3]))),
+        role=("0 筆未解釋的不符" if stats["role_bad"] == 0
+              else "**%d 筆未解釋的不符**" % stats["role_bad"]),
+        models=describe(pj.models), mates=mates,
+        scope="; ".join("%s: %s" % (k, pj.load(k)[1].scope)
+                        for k in pj.board_keys("all")),
+        absent="; ".join("%s: %s" % (k, ", ".join(v) or "無")
+                         for k, v in stats["absent"].items()),
+        floating="; ".join("%s: %d 條" % (k, len(v))
+                           for k, v in stats["floating"].items()),
+        pending=("\n".join("- [ ] %s" % x for x in stats["model_pending"])
+                 or "- （無）"))
     p = os.path.join(pj.dir, "REVIEW.md")
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(txt)
@@ -536,16 +803,44 @@ def cmd_pinfn(args, pj):
     dcfg = pj.cfg.get("datasheets") or {}
     ddir = os.path.join(pj.dir, dcfg.get("dir", "datasheets"))
     if args.list:
-        p, rows = ndd_pinfn.load_cache(pj.dir)
-        print("原文快取 %s（%d 筆）" % (p, len(rows)))
+        _p, rows, mig = ndd_pinfn.load_cache(pj.dir)
+        print("原文快取（%d 筆，其中 %d 筆為待重解析的舊 schema）" % (len(rows), mig))
         for r in rows:
-            print("  %-18s pin %-4s %-12s %-8s %s p.%s"
+            print("  %-18s pin %-4s %-12s %-8s %s p.%s  [%s/%s]"
                   % (r["part"], r["pin"], r["pin_name"], r["direction"],
-                     r["source_file"], r["page"]))
+                     r["source_file"], r["page"], r.get("package") or "-",
+                     r.get("resolved_by") or "-"))
         return
-    if not args.part or args.pin is None:
-        raise SystemExit("用法：ndd.py pinfn <料號> <腳位> [--file x.pdf]")
-    ndd_pinfn.lookup(pj.dir, ddir, args.part, args.pin, args.file)
+    part, observed = args.part, None
+    if args.refdes and args.pin is None and args.part is not None:
+        args.pin, part = args.part, None      # `pinfn --refdes U1 15` 的 15 是腳位
+    if args.refdes:
+        if not args.board or args.board == "all":
+            raise SystemExit("--refdes 要搭配 --board <key>")
+        nl, bom = pj.load(args.board)
+        if args.refdes not in nl.parts:
+            raise SystemExit("%s 不在 %s 的 netlist 中" % (args.refdes, args.board))
+        pn = bom.pn(args.refdes)
+        if is_ambiguous(pn):
+            raise SystemExit("%s 在 BOM 有多列衝突（列 %s），先解決 BOM"
+                             % (args.refdes, ",".join(str(x) for x in pn.rows)))
+        if not pn:
+            raise SystemExit("%s 不在 BOM 中，無法取得 MPN" % args.refdes)
+        part = pn
+        observed = list(nl.pins(args.refdes).keys())
+        print("鎖定三源：[N] %s.%s（%d 支已接腳）  [B] %s  [D] 待查"
+              % (args.board, args.refdes, len(observed), pn))
+    if not part or args.pin is None:
+        raise SystemExit("用法：ndd.py pinfn <料號> <腳位>  或  "
+                         "ndd.py pinfn --board <key> --refdes <refdes> <腳位>")
+    declared = args.package
+    if not declared:
+        pp = pj.cfg.get("part_package") or {}
+        if args.refdes:
+            declared = pp.get("%s:%s" % (args.board, args.refdes))
+        declared = declared or pp.get(part)
+    ndd_pinfn.lookup(pj.dir, ddir, part, args.pin, args.file,
+                     observed=observed, declared_package=declared)
 
 
 def cmd_models(args, pj):
@@ -572,8 +867,10 @@ def main(argv=None):
     p = sub.add_parser("trace"); p.add_argument("--signal"); p.set_defaults(func=cmd_trace)
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
-    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
+    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
     p = sub.add_parser("models"); p.set_defaults(func=cmd_models)
+    p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
+    p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
 
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
@@ -582,7 +879,18 @@ def main(argv=None):
     if getattr(args, "noproj", False):
         args.func(args)
         return 0
-    args.func(args, Project(args.config or find_config()))
+    # 遷移類錯誤要給乾淨、可行動的訊息，不要丟 traceback 給使用者
+    try:
+        pj = Project(args.config or find_config())
+    except ModelError as exc:
+        print("!! models.json 載入失敗：")
+        print(exc)
+        return 2
+    except ValueError as exc:
+        print("!! 設定或 BOM 載入失敗：")
+        print(exc)
+        return 2
+    args.func(args, pj)
     return 0
 
 

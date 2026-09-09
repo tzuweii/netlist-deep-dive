@@ -1,82 +1,41 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""元件「內部導通模型」庫 —— 追跡訊號鏈時，走到一顆 IC 要知道從哪支腳出去。
+"""元件行為模型：**有向 transfer 邊**、實體 control、runtime 條件、功能影響。
 
 ════════════════════════════════════════════════════════════════════════════
-⚠️ 本檔的鐵則：**任何模型都必須有 `verified_against`，且必須是真的翻過那份
-   datasheet 的那一頁。憑記憶寫腳位是這整套工具最容易出錯、也最難察覺的地方**
-   ——模型錯了，追出來的訊號鏈會看起來完全合理，但整張表是錯的。
-   沒有 `verified_against` 的模型，`load_models()` 會拒絕載入。
+三條鐵則：
+
+1. **分類的單位是「邊」，不是「元件」。** 同一顆 IC 可以同時有可傳輸的邊、
+   控制腳與狀態行為（移位暫存器就是），以元件為單位分類只能分錯。
+
+2. **方向必須顯式。** 舊版的 `pairs` 是對稱的，於是單向緩衝器可以從 output
+   逆走回 input，fanout 的兩個 output 可以藉 input 互通——後者是**憑空捏造
+   一條不存在的路徑**。`direction` 沒有預設值。
+
+3. **`always` 必須被正面證明。** 手寫 `condition: "always"` 是把未經查證的
+   斷言凍結成資產。改為宣告「這條邊由哪些 gate 把關」（事實），通斷性質由
+   netlist 實際接法推導（結論）。
 ════════════════════════════════════════════════════════════════════════════
 
-模型欄位：
-    match             : list[str]  比對 footprint 或 BOM 料號的子字串（大小寫不拘）
-    kind              : "switch" | "buffer" | "mux" | "fanout" | "passthru"
-    pairs             : list[[pin_a, pin_b]]  雙向導通的腳對
-    control           : {pin: 名稱}  OE / 選通腳，僅供人閱讀，不參與走圖
-    note              : str        走圖語意上的但書（例如 mux 是「軟體可打通」）
-    verified_against  : str        datasheet 檔名 + 頁碼 + 文件編號
-    verified_on       : str        查證日期
+⚠️ 任何模型都必須有 `verified_against`，且必須是真的翻過那份 datasheet 的那
+   一頁。沒有的話 `load_models()` 拒絕載入。
 """
 import io
 import json
 import os
+import re
 
-# ---------------------------------------------------------------------------
-# 種子模型：以下三筆都是逐頁翻過 datasheet 確認的，可直接沿用。
-# 換專案時若用到別的料號，**必須自己查證後再加**，不要照抄相近型號。
-# ---------------------------------------------------------------------------
-SEED_MODELS = {
-    "SN74CBTLV3126": {
-        "match": ["SN74CBTLV3126"],
-        "kind": "switch",
-        "pairs": [["2", "3"], ["5", "6"], ["8", "9"], ["11", "12"]],
-        "control": {"1": "1OE", "4": "2OE", "10": "3OE", "13": "4OE"},
-        "note": "FET bus switch，OE 高態導通。OE 拉低時 S/D 高阻抗，"
-                "且內部無輸入緩衝器，因此未使用通道的 S/D 懸空不會造成貫穿電流。",
-        "verified_against": "sn74cbtlv3126.pdf p.3 Table 4-1（TI SCDS038N）",
-        "verified_on": "2026-08-25",
-    },
-    "SN74HCS244": {
-        "match": ["SN74HCS244"],
-        "kind": "buffer",
-        "pairs": [["2", "18"], ["4", "16"], ["6", "14"], ["8", "12"],
-                  ["11", "9"], ["13", "7"], ["15", "5"], ["17", "3"]],
-        "control": {"1": "1OE (低態致能)", "19": "2OE (低態致能)"},
-        "note": "八路緩衝器，兩個 bank 各四路。OE 為**低態**致能，接 GND = 永遠致能。",
-        "verified_against": "sn74hcs244-q1.pdf p.3 Pin Functions（TI SCLS821C）",
-        "verified_on": "2026-08-25",
-    },
-    "PI49FCT3807": {
-        "match": ["PI49FCT3807"],
-        "kind": "fanout",
-        # A (輸入) = pin1；B0..B9 (輸出) = 3,5,7,9,11,12,14,16,18,19
-        "pairs": [["1", p] for p in ["3", "5", "7", "9", "11",
-                                     "12", "14", "16", "18", "19"]],
-        "control": {},
-        "note": "1-to-10 clock driver，無致能腳。⚠️ 輸出腳號不連續（11 之後跳到 12），"
-                "不要用等差級數推。",
-        "verified_against": "pi49fct3807.pdf p.2 Pin Description（Diodes DS43192 Rev 2-2）",
-        "verified_on": "2026-08-25",
-    },
-    "PCA9547": {
-        "match": ["PCA9547"],
-        "kind": "mux",
-        # 上游 SCL=19 / SDA=20 對各通道；HVQFN24 腳位
-        "pairs": ([["20", p] for p in ["1", "3", "5", "7", "10", "12", "14", "16"]]
-                  + [["19", p] for p in ["2", "4", "6", "8", "11", "13", "15", "17"]]),
-        "control": {"18": "A2", "22": "A0", "23": "A1", "24": "RESET (低態)"},
-        "addr": {"base": 112, "bits": {"18": 4, "23": 2, "22": 1}},   # 0x70
-        "note": "8 通道 I2C mux。走圖時把 8 個通道都視為可通，所以追出來的是"
-                "『軟體有可能打通的路徑』，不是同一瞬間的實際連線。"
-                "⚠️ A0/A1/A2 在部分符號裡沒有命名，會被畫成一般電源/接地腳，"
-                "看起來就像位址無從查起——實際上查 datasheet 腳位表就有。",
-        "verified_against": "PCA9547.pdf p.5 Table 3 HVQFN24 欄（NXP Rev.4）",
-        "verified_on": "2026-08-25",
-    },
-}
+import ndd_confidence as C
 
-# 兩腳被動件一律導通（不需要 datasheet）
+# --- 合法值 -----------------------------------------------------------------
+DIRECTIONS = ("forward", "bidirectional")
+PACKAGE_BASIS = ("exact_table", "not_applicable", "shared_pinout")
+CONTROL_TYPES = ("enable", "reset", "address", "select", "mode",
+                 "power", "clock", "trigger", "other")
+MECHANISMS = ("strap", "runtime", "external", "unknown")
+POLARITY_TYPES = ("enable", "reset")       # 只有這兩類可以有 high/low 極性
+
+# 兩腳被動件一律導通（不需要 datasheet），且**確實**是雙向的。
 TWO_PIN_FOOTPRINT_PREFIX = ("R_", "L_", "FB_", "Ferrite", "RES", "IND")
 
 
@@ -84,63 +43,305 @@ class ModelError(Exception):
     pass
 
 
+# --------------------------------------------------------------- 載入驗證 --
+def _fail(name, msg):
+    raise ModelError("模型 `%s`：%s" % (name, msg))
+
+
+def _validate(name, m):
+    if "pairs" in m:
+        _fail(name,
+              "使用了已移除的 `pairs` schema。這是**破壞性遷移**，不做靜默轉換"
+              "——舊 schema 的對稱性正是要修掉的錯誤，直接轉換會把錯誤帶進新 "
+              "schema。請重新核對 datasheet，改寫成有向的 `transfer`："
+              '\n  "transfer": [{"from": ["1"], "to": ["3"], '
+              '"direction": "forward"}]')
+
+    basis = m.get("package_basis")
+    if basis not in PACKAGE_BASIS:
+        _fail(name, "`package_basis` 必須是 %s 之一（目前 %r）"
+                    % ("／".join(PACKAGE_BASIS), basis))
+    if basis == "exact_table" and not m.get("package"):
+        _fail(name, "`package_basis: exact_table` 必須同時給 `package`，"
+                    "且值要是 datasheet 腳位表的**實際欄位標題**")
+
+    edges = m.get("transfer") or []
+    if not m.get("verified_against") and not all(
+            e.get("verified_against") for e in edges):
+        _fail(name, "缺 `verified_against`（model 層預設或逐邊 override 擇一）。"
+                    "腳位模型一律要翻過 datasheet 才能用，請填『檔名 + 頁碼 + "
+                    "文件編號』")
+
+    ctrl = m.get("control") or {}
+    for pin, spec in ctrl.items():
+        if not isinstance(spec, dict):
+            _fail(name, "control['%s'] 必須是物件；舊版的字串註記已不再支援"
+                        "（字串無法驅動 always/conditional 推導）" % pin)
+        if spec.get("type") not in CONTROL_TYPES:
+            _fail(name, "control['%s'].type 必須是 %s 之一"
+                        % (pin, "／".join(CONTROL_TYPES)))
+        if spec.get("mechanism") not in MECHANISMS:
+            _fail(name, "control['%s'].mechanism 必須是 %s 之一"
+                        % (pin, "／".join(MECHANISMS)))
+        if spec.get("polarity") and spec["type"] not in POLARITY_TYPES:
+            _fail(name, "control['%s'] 是 %s，不得指定 polarity"
+                        "（address／多 bit select／參數控制沒有 high/low 之分）"
+                        % (pin, spec["type"]))
+
+    rt = m.get("runtime_conditions") or {}
+    for edge in edges:
+        d = edge.get("direction")
+        if d not in DIRECTIONS:
+            _fail(name, "transfer 邊缺少顯式 `direction`（必須是 %s）。"
+                        "沒有預設值——任一方向當預設都會靜默把另一半元件模型錯"
+                        % "／".join(DIRECTIONS))
+        if not edge.get("from") or not edge.get("to"):
+            _fail(name, "transfer 邊必須同時有 `from` 與 `to`")
+        g = edge.get("gate")
+        if g:
+            keys = [k for k in ("all_of", "any_of") if k in g]
+            if len(keys) != 1:
+                _fail(name, "`gate` 必須顯式且只能是 `all_of` 或 `any_of` 其一，"
+                            "不可依 list 順序或預設布林邏輯猜測")
+            for item in g[keys[0]]:
+                if item in rt:
+                    continue
+                spec = ctrl.get(item)
+                if spec is None:
+                    _fail(name, "gate 引用了未定義的 `%s`"
+                                "（既不是 control pin 也不是 runtime_conditions）"
+                                % item)
+                if spec["type"] == "address":
+                    _fail(name, "gate 不得引用 address 腳（`%s`）。位址決定"
+                                "『是哪一顆』，不決定『通不通』；把它放進 gate "
+                                "會讓固定位址被誤推成 always" % item)
+    return m
+
+
 def load_models(project_dir=None):
-    """載入種子模型 + 專案自訂 `models.json`，並強制檢查 verified_against。"""
-    models = {k: dict(v) for k, v in SEED_MODELS.items()}
+    """載入專案 `models.json` 並強制驗證。
+
+    ⚠️ 本 skill **不內建 seed model**。初版帶的四個 seed 是 `pairs` schema、
+       無 `package_basis`，在新規格下無法載入；而通用型 skill 不應把任何特定
+       料號當成預設知識。要用就在專案的 `models.json` 自行查證後加入。
+    """
+    models = {}
     if project_dir:
         p = os.path.join(project_dir, "models.json")
         if os.path.exists(p):
             with io.open(p, encoding="utf-8") as fh:
-                for k, v in json.load(fh).items():
-                    models[k] = v
-    bad = [k for k, v in models.items() if not v.get("verified_against")]
-    if bad:
-        raise ModelError(
-            "以下模型沒有 `verified_against`，拒絕載入：%s\n"
-            "腳位模型一律要翻過 datasheet 才能用。請補上『檔名 + 頁碼 + 文件編號』，"
-            "或先用 `ndd.py datasheets` 把 datasheet 抓下來再查。" % ", ".join(bad))
+                raw = json.load(fh)
+            for k, v in raw.items():
+                models[k] = _validate(k, dict(v))
     return models
 
 
-def match_model(models, footprint, pn=""):
-    hay = ("%s|%s" % (footprint or "", pn or "")).upper()
-    for name, m in models.items():
-        for token in m["match"]:
-            if token.upper() in hay:
-                return name, m
-    return None, None
+# ----------------------------------------------------------------- 選型 --
+def _tokens(m):
+    return [t for t in m.get("match", []) if t]
 
 
-def pairs_for(models, footprint, pn="", npins=0):
-    name, m = match_model(models, footprint, pn)
-    if m:
-        return name, [tuple(x) for x in m["pairs"]]
+def select_model(models, footprint, pn="", package=None):
+    """回傳 (name, model, caveats)。
+
+    優先序（三階，不互斥）：① 精確 MPN → ② 唯一最長且具 token 邊界的 match
+    → ③ 仍同分才報錯。舊版走 dict 順序取第一個子字串命中，等於讓種子模型與
+    專案模型的優先權由**插入順序**決定，而且短 token 會誤中較長的料號。
+    """
+    pn_u = (pn or "").upper().strip()
+    fp_u = (footprint or "").upper()
+    hay = "%s|%s" % (fp_u, pn_u)
+
+    exact = [(k, m) for k, m in models.items()
+             if any(t.upper() == pn_u for t in _tokens(m)) and pn_u]
+    if len(exact) == 1:
+        return _package_filter(exact[0][0], exact[0][1], package)
+    if len(exact) > 1:
+        return None, None, ["model:ambiguous"]
+
+    scored = []
+    for k, m in models.items():
+        best = 0
+        for t in _tokens(m):
+            tu = t.upper()
+            # token 邊界：命中處前後不得是英數，否則 LM358 會誤中 LM3584
+            for mt in re.finditer(re.escape(tu), hay):
+                a, b = mt.start(), mt.end()
+                pre = hay[a - 1] if a else ""
+                post = hay[b] if b < len(hay) else ""
+                if not pre.isalnum() and not post.isalnum():
+                    best = max(best, len(tu))
+        if best:
+            scored.append((best, k, m))
+    if not scored:
+        return None, None, []
+    top = max(s[0] for s in scored)
+    winners = [(k, m) for n, k, m in scored if n == top]
+    if len(winners) > 1:
+        return None, None, ["model:ambiguous"]
+    return _package_filter(winners[0][0], winners[0][1], package)
+
+
+def _package_filter(name, m, package):
+    """package 已解析時，只接受相容的 model；未解析時依 basis 決定可否使用。"""
+    basis = m.get("package_basis")
+    if basis in ("not_applicable", "shared_pinout"):
+        return name, m, []                      # 封裝不改變涉及的腳位
+    want = (m.get("package") or "").upper()
+    if package:
+        got = str(package).upper()
+        # 欄標題會隨改版變動（PKG24 -> PKG24 (SOT616-1)），用子字串比對
+        if want and (want in got or got in want):
+            return name, m, []
+        return None, None, ["package:conflict"]
+    return name, m, ["package:unresolved"]
+
+
+# ------------------------------------------------------------- transfer --
+def transfer_edges(m):
+    """展開成 [(from_pin, to_pin, direction, edge), ...]。"""
+    out = []
+    for e in m.get("transfer") or []:
+        for a in e["from"]:
+            for b in e["to"]:
+                out.append((str(a), str(b), e["direction"], e))
+    return out
+
+
+def transfer_for(models, footprint, pn="", npins=0, package=None):
+    """回傳 (name, edges, caveats)。edges 為有向：只能由 from 走到 to。
+
+    ⚠️ **帶阻斷級 caveat 時 edges 一律為 None** —— package 未解析／衝突／
+       多重 match 的情況下不得生成正式 transfer edge，否則等於用未定案的
+       腳位對應去產生看起來確定的路徑。
+    """
+    name, m, caveats = select_model(models, footprint, pn, package)
+    blocking = [c for c in caveats if C.CAVEAT_CEILING.get(c) == C.UNKNOWN]
+    if blocking:
+        return name, None, caveats
+    if m is not None:
+        return name, transfer_edges(m), caveats
     if (footprint or "").startswith(TWO_PIN_FOOTPRINT_PREFIX) and npins == 2:
-        return "2-pin passive", [("1", "2")]
-    return None, None
+        # 兩腳被動件確實雙向，且不需要 datasheet
+        return "2-pin passive", [("1", "2", "bidirectional", {}),
+                                 ("2", "1", "bidirectional", {})], []
+    return None, None, []
 
 
-def i2c_addr(models, nl, refdes, pn=""):
-    """依模型的 addr 定義，由位址腳實際接 VDD/GND 反推 I2C 位址。"""
-    name, m = match_model(models, nl.parts.get(refdes, ""), pn)
+def outgoing(edges, pin):
+    """由 `pin` 可以合法走到哪些腳。**forward 邊只能正向走。**"""
+    out = []
+    for a, b, direction, edge in edges:
+        if a == pin:
+            out.append((b, edge))
+        elif b == pin and direction == "bidirectional":
+            out.append((a, edge))
+    return out
+
+
+# --------------------------------------------------- pin-existence check --
+def referenced_pins(m):
+    """model 引用到的所有實體 pin label（transfer 端點 + gate 的實體腳）。"""
+    pins = set()
+    for e in m.get("transfer") or []:
+        pins.update(str(x) for x in e.get("from", []))
+        pins.update(str(x) for x in e.get("to", []))
+    rt = m.get("runtime_conditions") or {}
+    ctrl = m.get("control") or {}
+    for e in m.get("transfer") or []:
+        g = e.get("gate") or {}
+        for key in ("all_of", "any_of"):
+            for item in g.get(key, []):
+                if item not in rt and item in ctrl:
+                    pins.add(str(item))
+    return pins
+
+
+def missing_pins(m, observed):
+    """⚠️ 這是 **pin-existence sanity check，不是 package 驗證**。
+
+    兩個封裝同為 1–N 而腳位定義不同時，它必然通過。它能抓的是打錯、以及照抄
+    了不同衍生型號的 model。名稱若叫「封裝驗證」，名字本身就在製造假保證。
+    """
+    return sorted(referenced_pins(m) - set(observed))
+
+
+# ------------------------------------------------------------ gating 推導 --
+def derive_gating(m, edge, rail_fn):
+    """回傳 (gating, notes)。
+
+    **`always` 必須被正面證明**：所有必要的實體 gate 都要由 netlist 證實接在
+    正確的有效狀態。runtime／外部驅動／浮接／未知一律降為 conditional 或
+    unknown——反過來就會靜默升級確定性。
+    """
+    g = edge.get("gate") or {}
+    key = "all_of" if "all_of" in g else ("any_of" if "any_of" in g else None)
+    if not key or not g[key]:
+        return C.ALWAYS, []                     # 無 gate = 恆通
+
+    rt = m.get("runtime_conditions") or {}
+    ctrl = m.get("control") or {}
+    results, notes = [], []
+    for item in g[key]:
+        if item in rt:
+            results.append(C.CONDITIONAL)
+            notes.append("%s=runtime_register" % item)
+            continue
+        spec = ctrl.get(item, {})
+        mech = spec.get("mechanism")
+        if mech in ("runtime", "external"):
+            results.append(C.CONDITIONAL)
+            notes.append("%s=%s" % (item, mech))
+            continue
+        if mech != "strap":
+            results.append(C.UNKNOWN)
+            notes.append("%s=mechanism_unknown" % item)
+            continue
+        state = rail_fn(item, spec.get("polarity"))
+        results.append(state[0])
+        notes.append("%s=%s" % (item, state[1]))
+
+    if key == "all_of":
+        return C.worst_gating(results), notes
+    # any_of：只要有一條被證實恆通即恆通
+    return (C.ALWAYS if C.ALWAYS in results
+            else C.worst_gating(results)), notes
+
+
+def control_influences(m):
+    return m.get("control_influence") or []
+
+
+def i2c_addr(models, nl, refdes, pn="", package=None):
+    """由 address 腳的實際接法反推 I2C 位址。
+
+    ⚠️ 位址只回答「是哪一顆」，**不回答「通不通」**——所以它不參與 gating 推導
+       （`_validate` 會拒絕把 address 腳放進 gate）。
+    """
+    _n, m, caveats = select_model(models, nl.parts.get(refdes, ""), pn, package)
     if not m or "addr" not in m:
-        return None
+        return None, caveats
     spec = m["addr"]
+    ctrl = m.get("control") or {}
     addr = spec["base"]
     for pin, weight in spec["bits"].items():
+        if ctrl.get(pin, {}).get("type") != "address":
+            raise ModelError("addr.bits 引用的 `%s` 未宣告為 address 腳" % pin)
         net = (nl.pin_net(refdes, pin) or "").upper()
         if net.startswith(("VDD", "VCC", "+")):
             addr += weight
-    return addr
+    return addr, caveats
 
 
 def describe(models):
     lines = []
     for name, m in sorted(models.items()):
-        lines.append("%-16s %-9s %2d 組導通  查證: %s"
-                     % (name, m["kind"], len(m["pairs"]), m["verified_against"]))
-    return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    print(describe(load_models()))
+        edges = transfer_edges(m)
+        lines.append("%-16s %-14s %2d 條 transfer  package=%s(%s)  查證: %s"
+                     % (name, m.get("kind", "?"), len(edges),
+                        m.get("package", "-"), m.get("package_basis", "?"),
+                        m.get("verified_against", "-")))
+        for a, b, d, _e in edges:
+            lines.append("        %s %s %s" % (
+                a, "->" if d == "forward" else "<->", b))
+    return "\n".join(lines) or "（尚未定義任何模型）"

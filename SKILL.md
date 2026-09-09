@@ -1,23 +1,26 @@
 ---
 name: netlist-deep-dive
-description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度電路架構分析，產出可查詢的 pinmap CSV、跨板端到端訊號鏈、架構文件與人工複驗清單，並附自動稽核。當使用者提供 .asc/BOM 要求分析電路架構、追訊號、找 DNI、盤點 IC、建立板級文件，或要求驗證既有架構文件是否仍與 netlist 相符時使用。跨專案通用。
+description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度電路架構分析，產出可查詢的 pinmap CSV、跨板端到端訊號鏈、功能拓樸提示、架構文件與人工複驗清單，並附自動稽核。當使用者提供 .asc/BOM 要求分析電路架構、追訊號、找未貼件、盤點 IC、建立板級文件，或要求驗證既有架構文件是否仍與 netlist 相符時使用。跨專案通用。
 ---
 
 # 電路深度分析（netlist deep dive）
 
 輸入只需要 **`.asc` netlist + BOM**。產出一整套：可查詢的 CSV、端到端訊號鏈、
-架構文件、稽核報告、人工複驗清單。
+功能拓樸提示、架構文件、稽核報告、人工複驗清單。
 
 ## 開始前先讀
 
 | 檔案 | 什麼時候讀 |
 |---|---|
-| `references/pitfalls.md` | **每次都讀。** 12 個已經踩過的坑，每個都會產生「看起來合理但是錯的」結論 |
-| `references/verification.md` | **Phase 4 一定要讀。** 三層驗證方法，以及哪些東西**結構上驗不到** |
-| `references/datasheets.md` | 需要腳位模型或要取得 datasheet 時讀 |
+| `references/pitfalls.md` | **每次都讀。** 每一條都會產生「看起來合理但是錯的」結論 |
+| `references/models.md` | **要建模型或追訊號前一定要讀。** transfer/control/endpoint 的分界 |
+| `references/verification.md` | **Phase 4 一定要讀。** 三層驗證，以及哪些東西**結構上驗不到** |
+| `references/datasheets.md` | 需要 datasheet 時讀 |
 
 工具在 `scripts/`，進入點是 `ndd.py`。**所有指令都要加 `PYTHONIOENCODING=utf-8`**
 （cp950 終端機會把中文輸出變亂碼）。
+
+回歸測試：`python -m unittest discover -s tests`。改動工具後一定要跑。
 
 ---
 
@@ -30,47 +33,63 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 | 主張類型 | 唯一合法來源 | 標記 |
 |---|---|---|
 | 連線——誰接到誰 | netlist | `[N]` |
-| 身分——料號、值、**有無貼件** | BOM | `[B]` |
-| 腳位功能、內部行為、極性 | datasheet | `[D 檔名 p.x]` |
+| 身分——料號、值、**BOM 範圍內有無列出** | BOM | `[B]` |
+| 腳位功能、方向、內部行為、極性 | datasheet | `[D 檔名 p.x]` |
 | 推論 | 上述組合 + 寫出推理過程 | `[?]` |
 
 ### 五條硬規則
 
-1. **腳位功能是 `[D]`——但只適用於「訊號穿過」的元件。** 先分級：
+1. **「訊號穿過」與「功能影響」是兩件事，分開講。**
 
-   | 級 | 元件 | 判別依據 | datasheet 用於 |
+   | 類別 | 例子 | 可進正式 trace | 可寫進拓樸說明 |
    |---|---|---|---|
-   | A 連接器／結構件 | SMP、SEAF/SEAM、TFML、T2M | **netlist 連上即事實** | 機構、電流額定 |
-   | B RF 被動網路 | divider、splitter、combiner、coupler、balun、天線 PCB | **腳數 + 上下游網路即拓樸**（1→2、16→1）；`_P`/`_N` 成對即差動 | 損耗、頻寬、耦合量、相位平衡 |
-   | C 純被動 | ferrite、PPTC、RTD、LED | netlist + BOM 值 | 額定、溫漂 |
-   | D 主動 IC，訊號終點 | FPGA、ASIC、EEPROM、振盪器、運放 | netlist + BOM | 功能、暫存器、時序、相位雜訊 |
-   | **E 主動 IC，訊號穿過** | bus switch、buffer、mux、fanout、SPDT | **一律要 datasheet** | — |
+   | `signal_transfer` | buffer、switch、mux、fanout、RF amp／移相器 | **可以**，但要 `[D]` 驗證 | 可以 |
+   | `control_influence` | OE、RESET、LOAD、SEL、暫存器設定 | **不可以** | 可以 |
+   | `stateful` | 移位暫存器、FPGA、MCU、ADC、DAC | **不可以** | 可以 |
+   | `terminal` | sensor input、天線端、量測腳、不再輸出的負載 | **不可以** | 可以 |
+   | `unknown_stop` | 無 datasheet／無法分類 | **不可以** | 只列已知事實，不推論 |
 
-   **只有 E 級在追跡前必須有 `[D]`。** A/B 級把拓樸標 `[N]` 並寫出推理，
-   **不要停在 `[D 缺]`**。E 級用 `ndd.py pinfn <料號> <腳位>` 抽原文，成本數十 token。
+   **分類的單位是「邊」，不是「元件」**——同一顆 IC 可以同時有 transfer 邊、
+   control 腳與狀態行為。「能控制它」不等於「訊號穿過它」：`LOAD -> Q outputs`
+   是物理上不存在的鏈路，正確的敘述是「此訊號同步觸發 N 個暫存器更新」。
 
-   ⚠️ 判定「缺」之前要用**全文**複核，不能只比檔名——family datasheet 與型錄類
-   文件必然漏判（`OP284FSZ` 在 `OP184_284_484.pdf`；`PS1608GT2` 在
-   `n_catalog_partition31_en.pdf`）。誤報「缺」會害人重複採購已持有的規格書。
-2. **有無貼件一律 `[B]`。** netlist 有 ≠ 板上有。
-3. **`[?]` 必須寫出定案方式。** 沒有定案路徑的推論不准寫進答案。
-4. **衝突時**：連線→netlist、料號→BOM、腳位功能→datasheet；**且衝突本身要講出來**，
-   不能默默選一個。
-5. **不可得就說不可得。** 缺 datasheet → 標 `[D 缺]` 並列入使用者待補清單，
-   **不得以推論代替**。追跡遇到查不到的 IC，**回報「停在 U6 (LMK00304SQ) pin15」
-   而不是繼續猜**——停在具名位置是有用的答案，猜出來的完整鏈路是有害的答案。
+   只有要走 `signal_transfer` 邊時才硬性需要 `[D]`。連接器、被動網路的拓樸
+   可以標 `[N]` 並寫出推理，**不要停在 `[D 缺]`**。
+
+   ⚠️ 判定「缺 datasheet」之前要用**全文**複核，不能只比檔名——family datasheet
+   必然漏判。誤報「缺」會害人重複採購已持有的規格書。
+
+2. **有無貼件受限於 BOM 範圍。** netlist 有 ≠ 板上有；BOM 沒有 ≠ 沒貼。
+   只有 `bom_scope: complete` 能說「候選 DNI」，其餘一律 `bom-absent:<scope>`。
+
+3. **`always` 要付證明，`conditional` 是預設。** 說某條路徑恆通，必須拿出
+   netlist 上 enable 腳實際接法的證據。runtime 選通、外部驅動、懸空、未知
+   一律降為 `conditional` / `unknown`。位址腳固定**不算**證明。
+
+4. **衝突時**：連線→netlist、料號→BOM、腳位功能→datasheet；**且衝突本身要
+   講出來**，不能默默選一個。
+
+5. **不可得就說不可得。** 缺 datasheet → 標 `[D 缺]`；封裝無法定案 → 標
+   `unknown_stop(package_unresolved)`。追跡遇到查不到的 IC，**回報「停在
+   U6 (<料號>) pin15」而不是繼續猜**——停在具名位置是有用的答案，猜出來的
+   完整鏈路是有害的答案。
 
 ### 執行機制：可見性
 
 每個電路回答**附一張壓縮證據表**（主張 → 來源），並主動寫出「這次我沒查什麼」。
-**沒有標記的主張，依定義就是未查證的**，使用者掃一眼就能抓到偷懶。
+**沒有標記的主張，依定義就是未查證的**。
+
+工具產出的兩個獨立欄位要照抄，不要自己合併：
+
+| 欄位 | 值 | 回答 |
+|---|---|---|
+| `confidence` | `confirmed > caveated > unknown` | 證據有多強 |
+| `gating` | `always` / `conditional` / `unknown` | 已查證的通斷性質 |
 
 ### 其他仍然適用的原則
 
-- **通則一定要展開逐顆比對。** 文件寫 `U<n>03`、`A<n>02` 這種通則，而通則幾乎
-  一定有例外（`role_rules` 展開檢查）。
-- **跨板對接要枚舉排名，不能只看「兩側相符」。** 對稱的 GND 分布會讓幾十種錯誤
-  對應全部「通過」。
+- **通則一定要展開逐顆比對**（`role_rules`），通則幾乎一定有例外。
+- **跨板對接要枚舉排名**，不能只看「兩側相符」。
 - **netlist 描述設計，不描述手上那片板。** rework、飛線、換料都不在裡面。
 
 ### 產出物政策（避免累積會腐化的東西）
@@ -79,48 +98,52 @@ description: 由 PADS 2000 ASCII netlist (.asc) 與 PCBA BOM (.xlsx) 做深度�
 |---|---|---|
 | **回答本身** | **主要交付物** | 每次 |
 | md 文件 | 只有使用者明確要求時 | 明確要求 |
-| pinmap CSV | **可重生的衍生物**，不是文件 | 需要時重跑，過期就丟 |
-| `verified-pins.csv` | **datasheet 原文快取**（見下） | `pinfn` 自動累積 |
-| 腳位模型 `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
-| assertions | 附屬於**已存在的**文件 | 沒有文件就不需要 |
+| pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
+| `topology_hint.csv` | 功能說明，**不是連通** | 隨 trace 產生 |
+| `verified-pins.csv` | **datasheet 原文快取** | `pinfn` 自動累積 |
+| `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
+| `MANIFEST.md` | 輸入檔指紋 | 寫文件時 |
 
-**原始來源是資產，結論是拋棄式的。** 囤積結論才是會腐化的東西。
+**原始來源是資產，結論是拋棄式的。**
 
 ---
 
 ## Phase 0 — 收檔案、建專案
 
-1. 確認拿到的東西：每塊板一份 `.asc` + 一份 BOM。缺 BOM 就先問，**不要只靠
-   netlist 做分析**——料號、DNI、被動元件值全部來自 BOM。
-2. 把檔案放進一個分析資料夾（建議 `<專案>/analysis/`），然後：
+1. 每塊板一份 `.asc` + 一份 BOM。缺 BOM 就先問。
 
 ```bash
 PYTHONIOENCODING=utf-8 python scripts/ndd.py init "C:/path/to/analysis"
 ```
 
-`init` 會用 **refdes 交集**配對 netlist 與 BOM（不是用檔名猜——檔名常含共通
-token，猜錯不會有任何跡象）。命中率 < 90% 或與次佳差距 < 30% 會標 `!! 需人工確認`。
+`init` 用 **refdes 交集**配對 netlist 與 BOM（不是用檔名猜）。命中率 < 90% 或
+與次佳差距 < 30% 會標 `!! 需人工確認`。
 
-3. 人工補完 `ndd.json`：
-   - `boards[*].bom_kind` — **是 SMT BOM 還是完整 BOM？**這直接影響 DNI 判讀
-     （SMT BOM 本來就不含連接器、測試點、鎖孔）
-   - `mates` — 連接器對接關係，`[板A, 連接器A, 板B, 連接器B]`
-   - `net_normalize` — 兩側命名習慣的差異（見 `pitfalls.md` #8）
-   - `trace.start` / `trace.slot_pattern`
+2. 人工補完 `ndd.json`（`init` 會寫出所有欄位的空殼）：
+   - `boards[*].bom_scope` — **`complete` / `smt_only` / `variant` / `unknown`**。
+     預設 `unknown`，**不得為了讓斷言通過而改成 complete**。
+   - `mates` — 連接器對接關係
+   - `mate_map` — **已批准**的腳位對映（可以先留空，見 Phase 4）
+   - `endpoints` — refdes 或料號 → `terminal` / `stateful` / `unknown_stop`
+   - `part_package` — **先留空**，只在工具要求時才填（見 Phase 3）
+   - `net_normalize`、`trace.start`、`trace.slot_pattern`
 
-4. 用 **AskUserQuestion** 問清楚：這些板子怎麼組成一台？哪些連接器對接？
+3. 用 **AskUserQuestion** 問清楚：這些板子怎麼組成一台？哪些連接器對接？
    有沒有線束？**不要自己猜拓樸。**
 
 ## Phase 1 — 盤點與初步理解
 
 ```bash
 python scripts/ndd.py export      # pinmap_<board>.csv：逐腳事實表
-python scripts/ndd.py audit       # 先跑一次，看 DNI 與懸空網路
+python scripts/ndd.py audit       # 先跑一次
+python scripts/ndd.py coverage    # per-MPN 三源覆蓋，看缺口在哪
 python scripts/ndd.py part <關鍵字>
 ```
 
-先看數量結構：某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映
-（例如 9 slot × 16 channel）。**先找出倍率，再解釋它。**
+先看數量結構：某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映。
+**先找出倍率，再解釋它。**
+
+`coverage` 的 `unclassified` 欄是**預設值不是結論**——未宣告的穿越件會落在那裡。
 
 ## Phase 2 — 取得 datasheet
 
@@ -129,105 +152,125 @@ python scripts/ndd.py datasheets              # 盤點 + 自動下載 + 產出 M
 python scripts/ndd.py datasheets --pn <料號> --url <你查到的網址>
 ```
 
-自動下載只對少數原廠站有效（實測 TI、NXP 可；Microchip 403；代理商站回
-bot-check HTML）。**流程**：先跑自動盤點 → 對 `MISSING.md` 裡的料號用
-**WebSearch** 找官方 datasheet 網址 → 用 `--url` 抓下來 → 自製件／連接器／
-機構件抓不到是正常的，留給使用者補。
+自動下載只對少數原廠站有效。流程：自動盤點 → 對 `MISSING.md` 裡的料號用
+**WebSearch** 找官方網址 → `--url` 抓下來 → 自製件／連接器抓不到是正常的。
 
-細節與陷阱見 `references/datasheets.md`。
-
-## Phase 3 — 查證腳位功能（規則 1 的執行方式）
+## Phase 3 — 查證腳位功能
 
 ```bash
-python ndd.py pinfn LMX2594 8
-#   lmx2594.pdf p.7:  8  OSCinP  Input  Reference input clock (+). ... Requires AC-coupling capacitor.
-python ndd.py pinfn --list        # 看已快取了哪些
+python ndd.py pinfn <料號> 8
+python ndd.py pinfn --board <板> --refdes U939 15   # 由工具鎖定三源
+python ndd.py pinfn --list
 ```
+
+`--refdes` 模式會自己從 BOM 取料號、從 netlist 取已接腳位與 footprint，
+**不必靠你記得傳對料號**。
 
 **先查快取，未命中才抽取；抽到的原文自動寫進 `verified-pins.csv`。**
 
-快取的欄位是 `料號, 腳位, 腳名, 方向, 原文摘句, 檔名, 頁碼, datasheet SHA256, 日期`。
-
 > **快取原文，永不快取解讀。**
-> 快取的是 datasheet 的逐字內容 + 出處，不是「pin1 與 pin3 內部連通」這種
-> 我推出來的拓樸結論。原文快取你 5 秒就能核對；推論快取會把錯誤凍結成永久
-> 資產，而且沒人看得出來。datasheet 換版時 SHA256 不符會自動失效重抽。
+> 快取的是逐字內容 + 出處（檔名／頁碼／SHA-256／封裝欄），不是「pin1 與 pin3
+> 內部連通」這種推出來的結論。原文快取 5 秒就能核對；推論快取會把錯誤凍結成
+> 永久資產。datasheet 換版時 SHA-256 不符會自動失效重抽。
 
-抽取器已處理三種腳位表排版（腳號在前／腳名在前／腳名+多封裝欄），並過濾目錄頁
-的假命中。⚠️ **多封裝欄時它會列出全部並警告，不會替你選**——`PCA9547` 的 pin 18
-在 SO24 是 `SC6`、在 HVQFN24 是 `A2`，選錯就全錯。先從 netlist 腳數與 BOM 料號
-後綴判斷封裝。
+### 封裝是惰性解析的
 
-抽不到（掃描影像、表格特殊）時，**人工開 PDF 確認**，不要略過。
+**絕大多數 IC 不需要你填封裝。** 只有同時滿足「你查了這顆」「datasheet 有多個
+腳位表欄」「各欄在你用到的腳上功能不同」時，工具才會要求指定：
 
-### 腳位模型（選用，非前提）
+```
+!! package 未解析（unresolved_pending_user）——拒絕寫入快取
+   請用 --package <欄標題> 指定；可選的欄：PKGA24／PKGB24
+```
 
-`models.json` 只在**同一顆 IC 被追第二次以上**時才值得建——建的時候是把已經查過
-的那次順手記下來，不是預先猜哪些會用到。已內建 4 個查證過的：`SN74CBTLV3126`、
-`SN74HCS244`、`PI49FCT3807`、`PCA9547`。
+此時把答案填進 `ndd.json` 的 `part_package`（可用料號當預設，
+`<board>:<refdes>` 覆寫個別元件）。實務上一個專案落在個位數。
 
-⚠️ **不要為了「先理解全盤電路」而預先大量建模。** 實測一個 3 板系統有 89 種主動
-料號，其中 74 種是終端負載（FPGA、感測器、LDO…）根本沒有「穿越」可言；建了
-83% 是空轉。而且模型是**你對 datasheet 的解讀**，大量預建等於把可能的錯誤凍結成
-看不見的永久資產。**要預先投資，投資在補齊 datasheet，不是建模型。**
+⚠️ **不要用腳數猜封裝。** netlist 只有已接腳，用腳數判定會穩定偏向較小的封裝。
+工具不會這樣做，你回答時也不要。
+
+### 元件模型（選用，非前提）
+
+`models.json` 只在**同一顆 IC 被追第二次以上**時才值得建。schema 與規則見
+`references/models.md`。要點：
+
+- `direction` 必須顯式（`forward` / `bidirectional`），沒有預設值
+- `gate`（通不通）與 `parameter_control`（通過後的性質）要分開
+- `always` 由 netlist 推導，不可手寫
+- **本 skill 不內建 seed model** —— 預先建模是把你的解讀凍結成永久資產
 
 ## Phase 4 — 驗證（先讀 `references/verification.md`）
 
 ```bash
 python scripts/ndd.py mate        # 連接器對接：枚舉所有對應方式並排名
-python scripts/ndd.py trace       # 端到端訊號鏈
-python scripts/ndd.py audit       # 完整稽核（含 parser 自我驗證）
+python scripts/ndd.py trace       # 端到端訊號鏈 + topology_hint
+python scripts/ndd.py audit       # 完整稽核
 ```
 
-**`mate` 的判讀**：只有「直通唯一勝出且 margin 夠大」才算站得住。
-margin ≤ 4 一定要在文件裡標明證據薄弱。工具也會自動判斷這個對接是
-「兩側同型 → 中間有線束」還是「公母直接對接 → 只剩 footprint 方位問題」，
-兩者的定案途徑完全不同。
+**`mate` 的判讀**：只有「直通唯一勝出且 margin 夠大」才算站得住。margin ≤ 4
+一定要標明證據薄弱。工具也會判斷是「兩側同型 → 中間有線束」還是「公母直接
+對接 → 只剩 footprint 方位」，兩者定案途徑完全不同。
 
-**殘存候選要用「會不會壞」排除**：把每個殘存對應代入，看它會不會造成立即而
-明顯的故障（例如 SDA/SCL 對調 → I2C 全滅）。若系統實際會動，該候選就被排除了。
-這通常比找線束圖快，而且是**唯一能同時涵蓋 layout 正確性的證據**。
+**排名不是批准。** 定案後把腳位對映填進 `ndd.json` 的 `mate_map`，附
+`evidence`（線束圖文件編號／continuity 記錄）。在那之前，`trace` 仍會跑，但
+每一列都帶 `mate:unapproved`——**那些是候選路徑，不是已確認的對接結論**，
+回答時必須照實說。
+
+**殘存候選要用「會不會壞」排除**：代入後看它會不會造成立即而明顯的故障
+（SDA/SCL 對調 → I2C 全滅）。系統若實際會動，該候選就被排除了。這通常比找
+線束圖快，而且是**唯一能同時涵蓋 layout 正確性的證據**。
+
+**`trace` 產出兩份，不可互換**：
+
+- `signal_chain.csv` — 只含已驗證的 `signal_transfer` 邊，可當架構結論
+- `topology_hint.csv` — control／stateful／參數控制／未知邊界，是**功能說明
+  不是連通**，永不得當成下一跳
 
 ## Phase 5 — 寫文件
 
-文件的分工要講清楚：**md 解釋「為什麼」，CSV 回答「是什麼」，稽核確認兩者一致。**
-不要把逐腳資料抄進 md——那是 CSV 的工作，抄進去只會過時且產生通則的例外。
+**md 解釋「為什麼」，CSV 回答「是什麼」，稽核確認兩者一致。** 不要把逐腳資料
+抄進 md。
 
 文件開頭必備：
 
-- 來源檔清單 + **SHA256 前綴 + 日期**（改版時才知道文件過期了）
+```bash
+python scripts/ndd.py manifest    # 產生 MANIFEST.md
+```
+
+- 引用 manifest（含 `.asc` / BOM / datasheet / **`ndd.json`** 的完整 SHA-256
+  與工具版本）而不是手打版本號——`ndd.json` 裡的 `mate_map`、`part_package`、
+  `net_normalize` 每一項都會改變結論
 - 一句「逐腳查詢請用 CSV / `ndd.py`，不要靠本文」
-- 書寫慣例：**每個 refdes 後面一律附料號**（`U103 (LMZ30606RKGT)`）
+- 書寫慣例：**每個 refdes 後面一律附料號**
 
 每寫一條可機械驗證的主張，就在 `ndd.json` 的 `assertions` 補一條。
-寫完後跑 `audit`，**首次執行的 FAIL 就是文件的錯**，改文件而不是改斷言；
-改完再把斷言改成驗證「更正後的事實」。
+寫完跑 `audit`，**首次執行的 FAIL 就是文件的錯**，改文件而不是改斷言。
 
 ## Phase 6 — 人工複驗清單
 
 ```bash
-python scripts/ndd.py review      # 產出 REVIEW.md
+python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 ```
 
-**這一步不可省略。** `REVIEW.md` 列出所有工具驗不到、必須人工確認的項目：
-腳位模型、對接證據薄弱處、rework、線束、BOM 變體、因果推論。
+**這一步不可省略。** 交付時要明確告訴使用者：
 
-交付時要明確告訴使用者：
-
-> 工具驗得到的部分（數值、連線、數量、命名規則）已經驗過並列在 A 段；
-> **B 段每一項都需要你人工確認**，工具無法代勞。
+> 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
+> 帶 `mate:unapproved` 的路徑是候選，不是結論；`unclassified` 端點是預設值，
+> 不是「已確認為負載」。
 
 ---
 
 ## 硬性規則
 
-- **不要憑記憶寫腳位。** 一律 `pinfn` 查 datasheet 原文並標頁碼。沒有 datasheet
-  就標 `[D 缺]`、停在具名位置，不要猜著補完。
-- **不要預先大量建模。** 見 Phase 3 末。要預先投資就投資在補 datasheet。
+- **不要憑記憶寫腳位。** 一律 `pinfn` 查原文並標頁碼。
+- **不要把控制關係當成訊號路徑。** latch/reset/select 進 hint，不進 trace。
+- **不要讓單向元件雙向走。** `direction` 必須來自 datasheet。
+- **不要用腳數推封裝。** netlist 只有已接腳。
+- **不要說「未貼件」除非 `bom_scope: complete`。**
+- **不要把 `mate:unapproved` 的路徑講成已確認對接。**
+- **不要預先大量建模。** 要預先投資就投資在補 datasheet。
 - **不要為了「看起來完整」而省略證據表。** 沒標記的主張等於自承未查證。
-- **不要用檔名猜配對**（netlist↔BOM、料號↔datasheet）。用 refdes 交集、用內容。
-- **不要把「兩側樣式相符」當成對接的證據。** 要枚舉排名。
+- **不要用檔名猜配對**（netlist↔BOM、料號↔datasheet）。用內容。
 - **不要在文件裡混用事實與推論。** 推論一律標 ⚠️ 並寫清楚定案方式。
-- **檔名含 CJK 相容表意字時**（例如 U+F99C 的「列」），Bash 會處理不了，
-  改用 PowerShell 或 Glob/Read 工具，或先複製到 ASCII 路徑。
+- **檔名含 CJK 相容表意字時**，Bash 會處理不了，改用 PowerShell 或 Glob/Read。
 - **Windows 上 Python 讀不到 Git Bash 的 `/c/...` 路徑**，要用 `C:/...`。

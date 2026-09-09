@@ -1,112 +1,121 @@
 {
-  "_comment": [
-    "ndd.json 範例（去識別化）。真實專案的設定應放在該專案的分析資料夾裡，",
-    "不要放進 skill —— 它會含料號、板名、架構等機敏資訊。",
-    "本範例示範一個常見拓樸：控制板 (ctrl) --排線--> 母板 (mb) --板對板--> 子板 (daughter) x N。"
+  "_說明": [
+    "去識別化的設定範例。所有 board key、refdes、net 名、料號都是抽象的，",
+    "**不要照抄任何真實專案的名稱**——真實專案只能當驗證語料，不能變成規則。",
+    "`ndd.py init` 會產生這份骨架的空殼版本；未出現在骨架裡的欄位，",
+    "使用者不會知道它存在，所以每個欄位都要寫出來。"
   ],
+
   "project": "example",
+
   "boards": {
-    "ctrl": {
-      "label": "Controller board",
-      "asc": "controller.asc",
-      "bom": "controller_bom.xlsx",
-      "bom_kind": "SMT BOM（不含手插件/機構件）",
-      "ref_col": null
-    },
-    "mb": {
-      "label": "Mother board",
-      "asc": "motherboard.asc",
-      "bom": "motherboard_bom.xlsx",
-      "bom_kind": "完整BOM",
-      "ref_col": null
-    },
-    "daughter": {
-      "label": "Daughter board (同一設計 xN，netlist 只有一份)",
-      "asc": "daughter.asc",
-      "bom": "daughter_bom.xlsx",
-      "bom_kind": "完整BOM",
-      "ref_col": null
-    }
-  },
-
-  "_comment_mates": [
-    "連接器對接。netlist 沒有跨板連線，這裡是唯一的來源。",
-    "同一片子板設計插在母板的 N 個 slot，就把每個 slot 連接器各寫一行。",
-    "填完務必跑 `ndd.py mate` 看排名，不要假設直通。"
-  ],
-  "mates": [
-    ["ctrl", "J1", "mb", "J90"],
-    ["mb", "J101", "daughter", "J2"],
-    ["mb", "J201", "daughter", "J2"]
-  ],
-
-  "_comment_power": [
-    "走圖時排除的電源網路。⚠️ 負向前瞻把 _EN / _PG 排除在外——它們名字帶 VDD",
-    "但其實是控制訊號，被當成電源會導致訊號追不到。專案若有別的命名習慣",
-    "（_CTRL、_SENSE…）要一併處理。"
-  ],
-  "power_net_regex": "^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\\d+V\\d+.*)$",
-
-  "_comment_normalize": [
-    "兩側命名習慣的差異。只剝『階層/slot 後綴』與共通前綴，",
-    "⚠️ 絕對不要剝功能編號（CLK_1 / CLK_2 剝掉數字就無法分辨列互換）。"
-  ],
-  "net_normalize": [["_SLOT_J\\d+$", ""], ["^TX_", ""]],
-
-  "_comment_trace": [
-    "從哪個連接器出發往下追。slot_pattern 用 capture group 取 slot 索引。"
-  ],
-  "trace": {
-    "start": [
-      {"board": "mb", "conn": "J90", "rail": "P"}
+    "_說明": [
+      "bom_scope 決定能不能說『未貼件』——這是本檔最容易填錯、後果最大的欄位。",
+      "  complete  完整 BOM（會列出 DNP 列）-> netlist 有而 BOM 無 = 候選 DNI",
+      "  smt_only  只有 SMT 件 -> 連接器/測試點/鎖孔本來就不在裡面",
+      "  variant   某個組裝變體",
+      "  unknown   還沒確認（**預設**，不得為了讓斷言通過而改成 complete）",
+      "舊欄位 `bom_kind` 已改名為 `bom_scope`，載入舊檔會給明確錯誤。"
     ],
-    "slot_pattern": "^J(\\d)01$"
+    "board_a": {
+      "label": "Board A",
+      "asc": "board_a.asc",
+      "bom": "board_a.xlsx",
+      "bom_scope": "complete",
+      "sheet": null,
+      "ref_col": null,
+      "expand_ranges": false
+    },
+    "board_b": {
+      "label": "Board B",
+      "asc": "board_b.asc",
+      "bom": "board_b.xlsx",
+      "bom_scope": "smt_only",
+      "sheet": null,
+      "ref_col": null,
+      "expand_ranges": false
+    }
   },
 
-  "_comment_assertions": [
-    "文件寫到哪，斷言就補到哪。首次執行的 FAIL 就是文件的錯——改文件，",
-    "不要改斷言遷就；改完再把斷言改成驗證『更正後的事實』。",
-    "可用 kind 見 references/verification.md。"
-  ],
-  "assertions": [
-    {"board": "mb", "kind": "count_pn", "pn": "SN74CBTLV3126DGVR", "expect": 81,
-     "desc": "bus switch 共 81 顆 (9 slot x 9)"},
-    {"board": "mb", "kind": "pin_net", "refdes": "U939", "pin": "1", "expect": "GND",
-     "desc": "U939 備用開關 OE(pin1) 接地"},
-    {"board": "mb", "kind": "single_pin_nets", "expect": 72,
-     "all_from": "SN74CBTLV3126",
-     "desc": "懸空網路 72 條，且全部出自備用開關（不是訊號鏈上的漏接）"},
-    {"board": "mb", "kind": "not_stuffed", "refdes": ["T902", "T903"],
-     "desc": "T902/T903 為 DNI"},
-    {"board": "mb", "kind": "bom_value", "refdes": "R130", "contains": "634",
-     "desc": "buck RSET = 634 ohm（→ 輸出並非標稱值，需實測確認）"},
-    {"board": "mb", "kind": "i2c_addr", "refdes": "U910", "expect": "0x71",
-     "desc": "I2C mux 位址由 A2/A1/A0 腳反推 = 0x71"},
-    {"board": "daughter", "kind": "pin_net_seq", "refdes": "J3", "pins": "1-16",
-     "expect": "CH_IN{i-1}", "desc": "J3 pin1..16 = CH_IN0..15"},
-    {"board": "daughter", "kind": "net_pin_count", "net": "CLK_1", "expect": 9,
-     "desc": "CLK_1 掛 8 顆 + 連接器 = 9 支腳"}
+  "mates": [
+    ["board_a", "J1", "board_b", "J2"]
   ],
 
-  "_comment_roles": [
-    "把文件裡的通則（U<n>03 這種）展開逐顆比對 BOM 料號。",
-    "⚠️ 通則幾乎一定有例外，查明原因後登錄進 known_exceptions，",
-    "之後重跑會標成『已知例外』而非失敗；新冒出來的才是真的要查。"
-  ],
-  "role_rules": [
-    {
-      "board": "mb", "index": [1, 9], "desc": "母板每 slot 角色",
-      "roles": {
-        "U{n}01": "PAC1954T-E/4MX",
-        "U{n}02": "SN74HCS244QPWRQ1",
-        "U{n}03": "LMZ30606RKGT",
-        "A{n}01": "TMP100NA/3K",
-        "A{n}02": "PTS1206M1B1K00P100"
-      },
-      "known_exceptions": {
-        "A902": "slot 9 的 RTD 因編號被板級感測器佔走而跳號到 A904"
-      }
+  "mate_map": {
+    "_說明": [
+      "**已批准**的腳位對映。key 是 `<板A>:<連接器A>|<板B>:<連接器B>`。",
+      "沒有批准時 trace 仍會跑（退回同 pin label），但每條邊帶 mate:unapproved，",
+      "那些列是**候選路徑**，不是已確認的線束／板對板對接結論。",
+      "載入時會驗證：完整性、單射、雙向往返、pin 存在性。",
+      "單射特別重要——兩個 A 腳映到同一個 B 腳會靜默合併兩條 net。"
+    ],
+    "board_a:J1|board_b:J2": {
+      "approved": {"1": "1", "2": "2", "3": "3", "4": "4"},
+      "evidence": "線束圖 <文件編號> rev <版次>，或 continuity 實測記錄",
+      "confidence": "confirmed"
     }
+  },
+
+  "part_package": {
+    "_說明": [
+      "**惰性**例外表，隨用隨長，不是 init 後的必填清單。",
+      "只有在『datasheet 有多個腳位表欄，且會改變用到的腳』時才需要填。",
+      "值要是 datasheet 腳位表的**實際欄位標題**，不是口語封裝名。",
+      "可用 MPN 當預設，再用 `<board>:<refdes>` 覆寫個別元件。"
+    ],
+    "MUX_A": "PKGA24",
+    "board_a:U7": "PKGB24"
+  },
+
+  "endpoints": {
+    "_說明": [
+      "端點分類。**預設是 unclassified，那是預設值不是結論。**",
+      "  terminal      已確認的終端負載（sensor input、天線端、量測腳）",
+      "  stateful      狀態或轉換端點（FPGA、MCU、ADC、DAC、移位暫存器）",
+      "  unknown_stop  已確認可能穿越、但還沒建模 -> 停在具名位置，不進 loads",
+      "不宣告的一律 unclassified：**仍會出現在 signal_chain.csv**（否則未宣告的",
+      "大量真實終端會全部消失、trace 失去用途），但帶 endpoint:unclassified caveat。"
+    ],
+    "ADC_A": "stateful",
+    "SENSOR_A": "terminal",
+    "board_a:U9": "unknown_stop"
+  },
+
+  "power_net_regex": "^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\\d+V\\d+.*)$",
+  "_power_net_regex_說明": [
+    "走圖時排除電源網路，否則整張圖連成一團。",
+    "⚠️ 負向前瞻是為了排除 `VDD_3V3_EN` 這種**名字帶 VDD、實際是控制訊號**的網路。",
+    "換專案時檢查有沒有別的命名習慣（_CTRL、_SENSE…）。"
+  ],
+
+  "net_normalize": [
+    ["_TX_J\\d+$", ""],
+    ["^BRD_", ""]
+  ],
+  "_net_normalize_說明": [
+    "只剝**階層／slot 後綴**與共通前綴。",
+    "⚠️ 不要剝功能編號——把 CLK_1 與 CLK_2 正規化成同一個，會讓『A/B 兩列互換』",
+    "與『直通』得到相同分數，排名失去鑑別力。"
+  ],
+
+  "trace": {
+    "start": [{"board": "board_a", "conn": "J1", "rail": "P"}],
+    "slot_pattern": "^JS(\\d+)$"
+  },
+
+  "assertions": [
+    {"board": "board_a", "kind": "pin_net", "refdes": "U1", "pin": "2",
+     "expect": "SIG_IN", "desc": "U1.2 接 SIG_IN"},
+    {"board": "board_a", "kind": "count_pn", "pn": "BUF_A", "expect": 4,
+     "desc": "BUF_A 共 4 顆"},
+    {"board": "board_a", "kind": "not_stuffed", "refdes": ["R9", "R10"],
+     "desc": "R9/R10 未貼件（⚠️ 只有 bom_scope=complete 才可能 PASS）"}
+  ],
+
+  "role_rules": [
+    {"board": "board_a", "desc": "每個 slot 一顆緩衝器", "index": [1, 8],
+     "roles": {"U{n}03": "BUF_A"},
+     "known_exceptions": {"U703": "跳號，實際在 U704"}}
   ],
 
   "datasheets": {"dir": "datasheets", "parts": []}
