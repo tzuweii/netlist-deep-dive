@@ -19,6 +19,7 @@
     python ndd.py models --add PCA9547        # 把範例複製進專案的 models.json
     python ndd.py manifest                    # 輸入檔完整 SHA-256 + 工具版本
     python ndd.py coverage                    # per-MPN 三源覆蓋狀況
+    python ndd.py blockers                    # 訊號鏈停在哪些料號上（建模投報率）
     python ndd.py migrate <分析資料夾>        # 把 v0 的設定升級到 v1
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
@@ -479,6 +480,8 @@ def cmd_init(args):
     _run_step("mate —— 連接器對接排名", lambda: cmd_mate(A(), pj), results)
     _run_step("trace —— 端到端訊號鏈", lambda: cmd_trace(A(), pj), results)
     _run_step("coverage —— per-MPN 三源覆蓋", lambda: cmd_coverage(A(), pj), results)
+    blockers = _run_step("blockers —— 建模投報率排名",
+                         lambda: cmd_blockers(A(), pj), results)
     _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
 
@@ -505,6 +508,12 @@ def cmd_init(args):
                         % len(stats["model_pending"]))
         if stats.get("model_inferred"):
             todo.append("- [ ] **%d 項封裝是推論的** —— 請複核" % len(stats["model_inferred"]))
+    if blockers:
+        top = sorted(blockers.items(), key=lambda x: -x[1]["chains"])[:3]
+        todo.append("- [ ] **訊號鏈停在這幾顆上**（依擋住的鏈路數）：%s\n"
+                    "        跑 `ndd.py blockers` 看完整排名。其他訊號腳多的優先"
+                    "建模，只是終端的填 `endpoints` 就好。"
+                    % "、".join("`%s`（%d 條）" % (p, e["chains"]) for p, e in top))
     todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載與穿越件"
                 "逐一填進 `ndd.json` 的 `endpoints`")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/MISSING.md`")
@@ -1173,6 +1182,80 @@ def cmd_coverage(args, pj):
     return agg
 
 
+# ---------------------------------------------------------------- blockers --
+def cmd_blockers(args, pj):
+    """訊號鏈停在哪些料號上、各擋住幾條 —— **建模投報率排名**。
+
+    ⚠️ 這條指令的存在理由：原本的規則是「同一顆 IC 被追第二次以上才值得建
+       模型」，但那要靠**跨 session 的記憶**才能執行 —— AI 沒有，人也不會去
+       數。規則寫成靠記憶執行的判斷，等於沒有規則。
+
+       改成讓工具數：每條訊號鏈停在哪顆料號上，累加起來就是投報率。
+       不需要記憶，也不需要 datasheet。
+
+    「其他訊號腳」= 該顆除了訊號停住的那支腳之外，還有幾支接在**非電源**網路
+    上。數字大代表訊號很可能還會繼續走 —— 這是**只用 netlist** 就能算的
+    穿越件跡象，不是猜料號家族。
+    """
+    p = os.path.join(pj.dir, args.outdir, "signal_chain.csv")
+    if not os.path.exists(p):
+        raise SystemExit("找不到 %s —— 先跑 `ndd.py trace`。" % p)
+    with io.open(p, encoding="utf-8-sig", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+
+    fab = pj.fabric()
+    boards = pj.all_boards("all")
+    eps = pj.cfg.get("endpoints") or {}
+    stat = {}
+    for r in rows:
+        for tag in (r.get("loads") or "").split():
+            if "." not in tag:
+                continue
+            rd, pin = tag.split(".", 1)
+            for k, (nl, bom) in boards.items():
+                if rd not in nl.parts:
+                    continue
+                pn = bom.pn(rd)
+                pn = pn if isinstance(pn, str) and pn else "(無 MPN)"
+                others = sum(1 for q, net in nl.pins(rd).items()
+                             if q != pin and net and not fab.is_power(net))
+                e = stat.setdefault(pn, {"chains": 0, "parts": set(), "others": 0})
+                e["chains"] += 1
+                e["parts"].add("%s.%s" % (k, rd))
+                e["others"] = max(e["others"], others)
+                break
+
+    if not stat:
+        print("訊號鏈沒有停在任何具名料號上。")
+        return stat
+    ddir = os.path.join(pj.dir, (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
+    have = [re.sub(r"[^a-z0-9]", "", f.lower())
+            for f in os.listdir(ddir)] if os.path.isdir(ddir) else []
+
+    print("訊號鏈停在這些料號上 —— 依「擋住幾條鏈路」排序")
+    print("（已宣告 endpoints 的不需要建模；其他訊號腳多代表訊號可能還會繼續走）\n")
+    print("%-30s %8s %5s %10s %5s %s"
+          % ("MPN", "擋住鏈路", "顆數", "其他訊號腳", "DS", "建議"))
+    print("-" * 96)
+    for pn, e in sorted(stat.items(), key=lambda x: -x[1]["chains"]):
+        declared = eps.get(pn)
+        if declared:
+            tip = "已宣告 %s" % declared
+        elif e["others"] >= 2:
+            tip = "**很可能是穿越件 —— 優先建模**"
+        elif e["others"] == 0:
+            tip = "像終端 —— 宣告 endpoints 即可"
+        else:
+            tip = "先宣告 endpoints，確認是不是終端"
+        print("%-30s %8d %5d %10d %5s %s"
+              % (pn[:30], e["chains"], len(e["parts"]), e["others"],
+                 "有" if _ds_present(pn, have) else "無", tip))
+    print("")
+    print("建模看 `references/models.md`；範例用 `ndd.py models --examples`。")
+    print("只是終端負載的，填 ndd.json 的 endpoints 就好，**不需要建模也不需要 datasheet**。")
+    return stat
+
+
 # ------------------------------------------------------------------ review --
 REVIEW_TMPL = u"""# 人工複驗清單
 
@@ -1431,6 +1514,7 @@ def main(argv=None):
     p.set_defaults(func=cmd_models)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
+    p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)
     p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")
     p.set_defaults(func=cmd_migrate, noproj=True)
 

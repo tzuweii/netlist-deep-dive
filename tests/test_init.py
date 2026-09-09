@@ -127,6 +127,24 @@ class TestInitRun(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(d, "SETUP.md")))
 
 
+class TestBlockers(unittest.TestCase):
+    """建模投報率排名 —— 取代「同一顆被追第二次以上」這條靠記憶的規則。"""
+
+    def test_blockers_needs_trace_first(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        os.remove(os.path.join(d, "export", "signal_chain.csv"))
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["--config", os.path.join(d, "ndd.json"), "blockers"])
+        self.assertIn("trace", str(cm.exception))
+
+    def test_blockers_runs_inside_init(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("blockers", txt, "init 的流程結果要列出這一步")
+
+
 class TestMigrate(unittest.TestCase):
     """v0 專案設定升級。**只改設定，不動原始檔。**"""
 

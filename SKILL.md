@@ -257,8 +257,28 @@ python ndd.py pinfn --list
 
 ### 元件模型（選用，非前提）
 
-`models.json` 只在**同一顆 IC 被追第二次以上**時才值得建。schema 與規則見
-`references/models.md`。要點：
+**不要靠記憶判斷哪顆值得建模——用數的：**
+
+```bash
+python ndd.py blockers      # 訊號鏈停在哪些料號上、各擋住幾條
+```
+
+```
+MPN                          擋住鏈路  顆數  其他訊號腳  DS  建議
+X-Band PGA chip v3 LTCC…       1188    16        13     無  **很可能是穿越件 —— 優先建模**
+SN74LV595AQWBQBRQ1              612    16         9     有  **很可能是穿越件 —— 優先建模**
+TMP100NA/3K                      36     1         1     無  先宣告 endpoints，確認是不是終端
+```
+
+「其他訊號腳」= 該顆除了訊號停住的那支腳外，還有幾支接在**非電源**網路上。
+數字大代表訊號很可能還會繼續走——這是**只用 netlist** 就能算的穿越件跡象。
+
+⚠️ 舊版的規則是「同一顆 IC 被追第二次以上才值得建」，但那要靠**跨 session
+的記憶**才能執行——AI 沒有，人也不會去數。**規則寫成靠記憶執行的判斷，等於
+沒有規則。** 改成讓工具數。
+
+**只是終端負載的，填 `ndd.json` 的 `endpoints` 就好，不需要建模也不需要
+datasheet。** schema 與規則見 `references/models.md`。要點：
 
 - `direction` 必須顯式（`forward` / `bidirectional`），沒有預設值
 - `pin_roles` 記下 VSS/VDD 是哪幾支腳（成本趨近於零，卻是封裝判定的主要證據）
