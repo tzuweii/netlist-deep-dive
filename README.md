@@ -67,11 +67,14 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
    輸出之間**憑空捏造**一條不存在的路徑。
 4. **`always` 要付證明，`conditional` 是預設** —— 反過來就會靜默升級確定性。
 5. **必填放在它免費的地方，惰性放在它昂貴的地方** —— 建模時人已在讀 datasheet，
-   要求填封裝成本為零；要求為全專案兩百顆 IC 預先填封裝則是純浪費。
-6. **包含關係優於基數** —— netlist 只有已接腳，任何依賴「數量相等」的判定都會
+   順手記下 VSS/VDD 是哪幾支腳成本為零；要求為全專案兩百顆 IC 預先填封裝則是
+   純浪費。
+6. **推論要標記** —— 由 netlist/BOM 推出的封裝一律帶 `[?]`，證據不足就列入待補，
+   **不替使用者假設**。
+7. **包含關係優於基數** —— netlist 只有已接腳，任何依賴「數量相等」的判定都會
    系統性偏移。
-7. **降級標記優於硬拒絕** —— 但標記必須沿路徑傳遞到最終輸出，否則等於沒標。
-8. **原始來源是資產，結論是拋棄式的。**
+8. **降級標記優於硬拒絕** —— 但標記必須沿路徑傳遞到最終輸出，否則等於沒標。
+9. **原始來源是資產，結論是拋棄式的。**
 
 > netlist 證明「接線意圖」，layout 證明「實體位置」，只有系統行為能證明「兩者都對」。
 > 三者不能互相取代。
@@ -92,7 +95,8 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `scripts/ndd_pads.py` | netlist 解析 + 獨立邏輯的自我驗證 |
 | `scripts/ndd_bom.py` | BOM 解析、ambiguity、`bom_scope` |
 | `scripts/ndd_confidence.py` | confidence／gating 兩軸與 caveat 的唯一定義處 |
-| `scripts/ndd_pinfn.py` | datasheet 原文抽取 + 惰性 package 解析 |
+| `scripts/ndd_pinfn.py` | datasheet 原文抽取與快取（**不做封裝判定**） |
+| `scripts/ndd_package.py` | 封裝判定：只用 netlist + BOM 的證據排名 |
 | `scripts/ndd_models.py` | 有向 transfer 模型、control 推導 |
 | `scripts/ndd_graph.py` | 對接排名 + 跨板追跡 + hint graph |
 | `scripts/ndd_audit.py` | 宣告式斷言引擎 |
@@ -105,8 +109,11 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 
 - 目前只支援 **PADS 2000 ASCII** 格式的 netlist。
 - datasheet 自動下載只對少數原廠站有效；其餘需人工補上。
-- 腳位表逐欄抽取依賴 PDF 文字層；掃描影像或特殊排版會抽取失敗，此時封裝改由
-  人工指定，**不會退回腳數猜測**。
+- **工具不解析 datasheet 的腳位表。** 每家排版都不同（腳註標記、跨行儲存格、
+  文字層把兩個腳號併成一個），通用地「看懂」是無底洞，而且一列錯位就讓整張表
+  作廢。封裝改由 netlist + BOM 的證據排名判定，推論結果一律標 `[?]`。
+- `pinfn` 抽到多筆時會攤開全部原文與腳號欄位，**拒絕替你挑**；抽不到時明說
+  「請人工開 PDF」，不猜。
 - 工具**驗不到**：因果推論、實體板狀態（rework）、layout 決定的量（阻抗／耦合／
   footprint 方位）、線束、韌體 runtime 狀態。這些一律列進 `REVIEW.md`。
 
