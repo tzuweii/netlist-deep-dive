@@ -129,6 +129,99 @@ v0 的 `tests/` 不存在，而 README 的賣點是「把驗證本身也工具�
 且 `loads` 欄語意改變；`pinmap_<board>.csv` 新增 `bom_scope`、`stuffed` 新增
 `UNKNOWN` / `AMBIGUOUS`；新增 `topology_hint.csv`。
 
+### 從 v0 專案升級
+
+**原始檔（`.asc` / BOM / datasheet）完全不用動。** 要改的只有設定與模型，
+而且工具會逐項擋下來並告訴你怎麼改——不會靜默沿用舊值。
+
+依實際出現的順序：
+
+#### 1. `models.json` 的 `pairs`（若有建過模型）
+
+```
+!! models.json 載入失敗：
+模型 `BUF`：使用了已移除的 `pairs` schema。這是**破壞性遷移**，不做靜默轉換
+——舊 schema 的對稱性正是要修掉的錯誤，直接轉換會把錯誤帶進新 schema。
+```
+
+**不要機械轉換。** 舊 `pairs` 沒有方向資訊，照抄過來只會把「單向元件可雙向走」
+這個錯誤帶進新 schema。要重新翻 datasheet 補三件事：
+
+```json
+{
+  "BUF": {
+    "match": ["BUF_A"],
+    "kind": "signal_transfer",
+    "package": "TSSOP20",
+    "verified_against": "buf.pdf p.3 Table 4-1",
+    "pin_roles": {"10": "GND", "20": "PWR"},
+    "transfer": [{"from": ["2"], "to": ["18"], "direction": "forward",
+                  "gate": {"all_of": ["1"]}}],
+    "control": {"1": {"type": "enable", "polarity": "low",
+                      "mechanism": "strap"}}
+  }
+}
+```
+
+- `direction` —— `forward` 或 `bidirectional`，**沒有預設值**
+- `pin_roles` —— VSS/VDD 是哪幾支腳。多封裝料號沒填就無法判別封裝
+- `control` —— 由字串改成結構化（`type` / `mechanism` / `polarity`）
+
+沒建過模型的專案可略過這一步（v0 內建的 4 個 seed model 已移除，追跡會停在
+主動件並標 `unclassified`）。
+
+#### 2. `ndd.json` 的 `bom_kind` → `bom_scope`
+
+```
+board 'a' 仍使用已改名的 `bom_kind`。請改為 `bom_scope`，對應：
+SMT BOM -> smt_only、完整 BOM -> complete、未標註 -> unknown。
+**不得預設 complete** —— 那會把未知範圍的缺件誤報成真 DNI。
+```
+
+每塊板都要改。**不確定就填 `unknown`**——那只會讓 `not_stuffed` 斷言 FAIL 並
+回報 `bom-scope-insufficient`，不會產生錯誤結論。
+
+#### 3. 其餘新欄位：不用補
+
+`mate_map`、`part_package`、`endpoints` 缺少時走預設空值，**不報錯**：
+
+- 無 `mate_map` → `trace` 照跑，每列帶 `mate:unapproved`（候選路徑）
+- 無 `part_package` → 封裝由 netlist/BOM 證據推論，標 `[?]`
+- 無 `endpoints` → 端點預設 `unclassified`，仍進 `loads` 但帶 caveat
+
+想拿到 `confirmed` 等級的結論再逐步補。跑 `ndd.py review` 會列出待補清單。
+
+#### 4. `verified-pins.csv`：自動處理，但要重新確認
+
+舊列一律標為 `unresolved_pending_user`：
+
+```
+原文快取（1 筆，其中 1 筆為待重解析的舊 schema）
+  ADC_A  pin 1  AIN0  Input  adc.pdf p.4  [-/unresolved_pending_user]
+```
+
+原文還在（可以讀），但**不會被當成已解析的快取使用**——舊列缺 `package`
+欄，當成有效讀入等於把未鎖定封裝的資料洗成合法覆蓋。需要哪支腳就重跑 `pinfn`。
+
+#### 5. 衍生產物：刪掉重跑
+
+`export/`、`REVIEW.md`、`MANIFEST.md` 都是可重生的。欄位已變動（`signal_chain.csv`
+新增 `caveats` / `confidence` / `endpoint_kind`，`loads` 語意改變），直接刪掉重跑：
+
+```bash
+rm -rf export REVIEW.md
+PYTHONIOENCODING=utf-8 python ndd.py --config <你的>/ndd.json audit
+python ndd.py coverage    # 看新的待補缺口
+python ndd.py trace
+python ndd.py review
+```
+
+#### 預期的落差
+
+升級後**結論會變少、標記會變多**，這是預期的：v0 產出的某些鏈路其實建立在
+未批准的對接、或未經方向驗證的模型上。`coverage` 與 `REVIEW.md` 會告訴你
+差在哪裡。
+
 ### 已知限制
 
 **尚未用真實專案驗證。** 以下只跑過合成 fixture：
