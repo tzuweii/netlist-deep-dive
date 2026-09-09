@@ -32,9 +32,13 @@ class Netlist(object):
         self.parts = {}       # refdes -> footprint
         self.nets = {}        # net    -> [(refdes, pin), ...]
         self.pinmap = {}      # refdes -> {pin: net}
-        # ⚠️ 同一支腳出現在兩條 net（設計短路，或匯出錯誤）時，pinmap 只能留一個
-        #    值。舊版把被覆蓋的那條靜默丟掉，而 selfcheck 比的兩個數字**都**仍然
-        #    相等，所以會回報 PASS。這裡把覆蓋事件記下來，交給 selfcheck 判 FAIL。
+        # ⚠️ 同一支腳出現一次以上時，pinmap 只能留一個值，被覆蓋的那條靜默丟掉，
+        #    而 selfcheck 原本比的兩個數字**都**仍然相等，所以會回報 PASS。
+        #
+        #    這**不代表設計短路** —— 原理圖工具遇到短路會把兩條 net 合併成一條
+        #    再匯出，不會讓一支腳出現兩次。真正的成因是：parser 誤框（某行沒被
+        #    認成 *SIGNAL* 標頭，底下的腳被歸到前一條 net）、手改 .asc、串接多
+        #    個檔案、非 PADS 2000 方言。**偵測 parser 誤框正是第 0 層的職責。**
         self.dup_pins = {}    # (refdes, pin) -> [net, ...]
         self._parse()
 
@@ -70,11 +74,10 @@ class Netlist(object):
                         refdes, pin = tok.rsplit(".", 1)
                         self.nets[cur].append((refdes, pin))
                         prev = self.pinmap.setdefault(refdes, {}).get(pin)
-                        if prev is not None and prev != cur:
+                        if prev is not None:
                             d = self.dup_pins.setdefault((refdes, pin), [prev])
-                            if cur not in d:
-                                d.append(cur)
-                        self.pinmap[refdes][pin] = cur
+                            d.append(cur)          # 同 net 重複也要指名，否則
+                        self.pinmap[refdes][pin] = cur   # 只報數字不可行動
 
     # ---- 查詢 -------------------------------------------------------------
     def pins(self, refdes):
@@ -165,8 +168,11 @@ class Netlist(object):
         # ⚠️ 第三個計數，缺它就抓不到「一支腳掛兩條 net」：pin_tokens 與 got_pins
         #    在該情境下**都會**是 2，只有 pinmap 少了一筆。
         mapped_pins = sum(len(v) for v in self.pinmap.values())
-        dup = ["%s.%s -> %s" % (rd, p, " / ".join(nets))
-               for (rd, p), nets in sorted(self.dup_pins.items())]
+        dup = []
+        for (rd, p), nets in sorted(self.dup_pins.items()):
+            uniq = list(dict.fromkeys(nets))
+            dup.append("%s.%s -> %s" % (rd, p, " / ".join(uniq)) if len(uniq) > 1
+                       else "%s.%s 在 %s 內重複 %d 次" % (rd, p, uniq[0], len(nets)))
         ghost = [r for r in self.pinmap if r not in self.parts]
         ok = (part_lines == len(self.parts) and len(sig_names) == len(self.nets)
               and pin_tokens == got_pins and pin_tokens == mapped_pins
