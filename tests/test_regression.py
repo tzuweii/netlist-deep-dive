@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """回歸測試。
 
-每一條都對應 SPEC.md 裡一個**曾經會靜默出錯**的行為。全部使用合成 fixture，
+每一條都對應一個**曾經會靜默出錯**的行為（改動的理由見 CHANGELOG.md）。
+全部使用合成 fixture，
 不依賴任何客戶專案檔案、私有 datasheet 或特定 refdes。
 """
 import io
@@ -292,20 +293,18 @@ class TestModelSchema(unittest.TestCase):
     def test_legacy_pairs_schema_is_rejected(self):
         with self.assertRaises(ModelError) as cm:
             self._load({"X": {"match": ["X"], "pairs": [["1", "2"]],
-                              "verified_against": "a", "package_basis": "not_applicable"}})
+                              "verified_against": "a"}})
         self.assertIn("transfer", str(cm.exception))
 
     def test_direction_must_be_explicit(self):
         with self.assertRaises(ModelError):
-            self._load({"X": {"match": ["X"], "package_basis": "not_applicable",
-                              "verified_against": "a",
+            self._load({"X": {"match": ["X"], "verified_against": "a",
                               "transfer": [{"from": ["1"], "to": ["2"]}]}})
 
     def test_address_pin_may_not_gate(self):
         """固定位址不得被誤推成 always —— 直接在載入時擋掉。"""
         with self.assertRaises(ModelError) as cm:
-            self._load({"X": {"match": ["X"], "package_basis": "not_applicable",
-                              "verified_against": "a",
+            self._load({"X": {"match": ["X"], "verified_against": "a",
                               "control": {"5": {"type": "address",
                                                 "mechanism": "strap"}},
                               "transfer": [{"from": ["1"], "to": ["2"],
@@ -320,8 +319,7 @@ class TestModelSchema(unittest.TestCase):
 
     def test_polarity_only_on_enable_like(self):
         with self.assertRaises(ModelError):
-            self._load({"X": {"match": ["X"], "package_basis": "not_applicable",
-                              "verified_against": "a", "transfer": [],
+            self._load({"X": {"match": ["X"], "verified_against": "a", "transfer": [],
                               "control": {"5": {"type": "address",
                                                 "polarity": "high",
                                                 "mechanism": "strap"}}}})
@@ -377,26 +375,21 @@ class TestGating(unittest.TestCase):
 
 class TestModelSelection(unittest.TestCase):
     def test_token_boundary_prevents_false_match(self):
-        models = {"SHORT": {"match": ["ABC12"], "package_basis": "not_applicable",
-                            "verified_against": "a", "transfer": []}}
+        models = {"SHORT": {"match": ["ABC12"], "verified_against": "a", "transfer": []}}
         name, m, _c = select_model(models, "", "ABC1234")
         self.assertIsNone(m, "短 token 不得誤中較長的料號")
 
     def test_exact_mpn_wins(self):
         models = {
-            "A": {"match": ["XY"], "package_basis": "not_applicable",
-                  "verified_against": "a", "transfer": []},
-            "B": {"match": ["XY100"], "package_basis": "not_applicable",
-                  "verified_against": "a", "transfer": []}}
+            "A": {"match": ["XY"], "verified_against": "a", "transfer": []},
+            "B": {"match": ["XY100"], "verified_against": "a", "transfer": []}}
         name, _m, _c = select_model(models, "", "XY100")
         self.assertEqual(name, "B")
 
     def test_ambiguous_match_is_reported(self):
         models = {
-            "A": {"match": ["ZZ9"], "package_basis": "not_applicable",
-                  "verified_against": "a", "transfer": []},
-            "B": {"match": ["ZZ9"], "package_basis": "not_applicable",
-                  "verified_against": "a", "transfer": []}}
+            "A": {"match": ["ZZ9"], "verified_against": "a", "transfer": []},
+            "B": {"match": ["ZZ9"], "verified_against": "a", "transfer": []}}
         _n, m, cav = select_model(models, "", "ZZ9")
         self.assertIsNone(m)
         self.assertIn("model:ambiguous", cav)

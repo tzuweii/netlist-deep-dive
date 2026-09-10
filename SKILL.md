@@ -385,8 +385,8 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 **這一步不可省略。** 交付時要明確告訴使用者：
 
 > 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
-> 帶 `mate:unapproved` 的路徑是候選，不是結論；`unclassified` 端點是預設值，
-> 不是「已確認為負載」。
+> 排名無法定案的對接（`mate:ambiguous`）是候選不是結論；`unclassified` 端點
+> 是**還沒分類**，不是「已確認為負載」。
 
 ---
 
@@ -398,7 +398,7 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 - **不要用腳數推封裝。** netlist 只有已接腳。封裝由電源腳接法等證據排名判定。
 - **推論出來的封裝一律標 `[?]`。** 它不是查證過的事實。
 - **BOM 缺席就是未貼件**，除非該類零件不在該 BOM 的涵蓋範圍內（SMT BOM 的連接器/機構件）。
-- **不要把 `mate:unapproved` 的路徑講成已確認對接。**
+- **排名無法定案的對接不要講成已確認。** 排名定案的（`inferred`）可以用，但標 `[?]`。
 - **不要預先大量建模。** 要預先投資就投資在補 datasheet。
 - **不要為了「看起來完整」而省略證據表。** 沒標記的主張等於自承未查證。
 - **不要用檔名猜配對**（netlist↔BOM、料號↔datasheet）。用內容。

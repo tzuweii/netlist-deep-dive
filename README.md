@@ -77,6 +77,9 @@ python ndd.py trace         # signal_chain.csv + topology_hint.csv
 python ndd.py pinfn --board a --refdes U939 15   # 由工具鎖定三源查腳位
 python ndd.py datasheets    # 盤點/下載 datasheet
 python ndd.py manifest      # 輸入檔完整 SHA-256 + 工具版本
+python ndd.py pins U939     # 逐腳列出 net + 料號
+python ndd.py net TX_CLK    # 某條網路上有誰
+python ndd.py part SN74CBT  # 依 refdes / footprint / 料號搜尋
 python ndd.py blockers      # 訊號鏈停在哪些料號上（建模投報率）
 python ndd.py review        # 產出人工複驗清單 REVIEW.md
 ```
@@ -119,7 +122,6 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | 檔案 | 說明 |
 |---|---|
 | `CHANGELOG.md` | 版本紀錄與 v0 對比 |
-| `SPEC.md` | 行為契約與施工規格 |
 | `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |

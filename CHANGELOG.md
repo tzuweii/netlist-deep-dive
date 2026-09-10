@@ -59,6 +59,31 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v1.7.0 — 文件全面盤查；刪除 SPEC.md
+
+跑了一次全文件對照，修掉三份文件裡描述**已被推翻的決策**的段落：
+
+| 檔案 | 殘留 |
+|---|---|
+| `SKILL.md` | `mate:unapproved`（已改為 `inferred` / `ambiguous`） |
+| `references/pitfalls.md` | 「不內建任何 seed model」（已改為不自動載入的範例）、`bom_kind`、`endpoint:unclassified` 會降級 confidence |
+| `references/datasheets.md` | 「datasheet 是硬需求」（已改為按需補齊）；補上 `--pick` 流程與「工具不解析腳位表」 |
+| `scripts/ndd.py` 的 REVIEW 模板 | 產生的 `REVIEW.md` 還在輸出 `mate:unapproved` —— **那是使用者會看到的字串** |
+
+### 刪除 `SPEC.md`
+
+它是**施工規格**，施工已完成，而其中有 10 處以上描述後來被推翻的決策
+（`package_basis` 三態、`bom-absent:<scope>`、對接要人工批准、
+`endpoint:unclassified` 降級 confidence）。
+
+**留著一份過期的規格，比沒有規格更糟** —— 那正是這個 skill 存在的理由：
+「分析結果寫成文件之後，沒有任何機制能告訴你文件哪一段已經和實作對不上」。
+
+內容沒有消失：**為什麼這樣改**在 `CHANGELOG.md`，**現在怎麼運作**在
+`references/models.md`、`verification.md`、`pitfalls.md`。
+
+---
+
 ## v1.6.0 — 擋住「init 覆蓋掉手寫設定」這條資料遺失路徑
 
 其他工程師的第一次使用方式是「貼 GitHub 網址給 AI 安裝，再到專案資料夾跑

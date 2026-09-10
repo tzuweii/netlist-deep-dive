@@ -823,7 +823,7 @@ def cmd_trace(args, pj):
                 #    已批准的對映與 mate caveat），不能只用 mate_partners 取
                 #    對手板然後沿用同一個 pin number —— 那等於：
                 #      (a) 忽略 mate_map 的批准對映（非直通時直接算錯）
-                #      (b) mate:unapproved 永遠不會出現在輸出裡（標了等於沒標）
+                #      (b) 對接的 caveat 永遠不會出現在輸出裡（標了等於沒標）
                 crossings = fab.mate.get((mb, mrd, mpin), [])
                 if not crossings:
                     # ⚠️ 舊版在這裡 `continue`，整條訊號從 CSV 靜默消失。
@@ -1546,7 +1546,8 @@ REVIEW_TMPL = u"""# 人工複驗清單
 
 - [ ] margin ≤ 4 的項目，是否已用 layout 或 continuity 確認？
 - [ ] 兩側同型（都是公頭）的對接，是否已取得線束圖？
-- [ ] **帶 `mate:unapproved` 的路徑是候選路徑，不是結論。** 是否已填 `mate_map`？
+- [ ] **排名無法定案的對接（`mate:ambiguous`）是候選，不是結論。** 已填 `mate_map`？
+- [ ] **排名定案的（`inferred`）是推論** —— 證據在上表，複核過了嗎？
 
 ### B3. netlist 本身答不出來的
 - [ ] **netlist ≠ 實體板**：rework／飛線／換料都不在 `.asc` 裡。

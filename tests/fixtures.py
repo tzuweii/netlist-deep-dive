@@ -3,8 +3,8 @@
 """合成 fixture 產生器。
 
 ⚠️ **測試一律使用抽象料號與 refdes**（`BUF_A`、`MUX_A`、`U1`…），不得綁定任何
-   真實專案的板名、net 名、refdes 或私有 datasheet。真實專案只能當驗證語料，
-   不能變成程式或測試中的特例。見 SPEC.md §12。
+   真實專案的板名、net 名、refdes 或私有 datasheet。真實專案只能當**驗證語料**
+   ——用來確認合成 fixture 沒漏掉現場情況，不能變成程式或測試中的特例。
 """
 import io
 import os

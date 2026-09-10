@@ -14,8 +14,9 @@
 文件編號），沒有就拒絕載入。翻 datasheet 的 Pin Configuration
 那一頁，不要相信「這顆跟那顆應該一樣」。
 
-**本 skill 不內建任何 seed model** —— 預先建模等於把「你對 datasheet 的解讀」
-凍結成看不見的永久資產。
+**範例模型在 `references/example-models.json`，但不自動載入** —— 用
+`ndd.py models --add <名稱>` 明確複製進專案。自動載入等於讓你在不知情下用
+別人的解讀去追訊號；複製之後它就是**你的宣告**，會被列進複核清單。
 
 ---
 
@@ -111,7 +112,7 @@ part 行數 / signal 數 / pin token 數 / **pinmap 收錄數** / 重名 / 幽�
 拿到 SMT BOM 時，連接器、測試點、鎖孔本來就不在裡面，它們不是未貼件。
 不標註 BOM 類型就會把 68 顆機構件當成 DNI 報出來。
 
-**防法**：`bom_kind` 欄位；`audit` 把 active / passive / 機構分開報，
+**防法**：`bom_scope` 欄位；`audit` 把 active / passive / 機構分開報，
 **只有 `class=active` 且不在 BOM 才是真 DNI**。
 
 ## 10. 位址腳被畫成電源腳
@@ -177,7 +178,8 @@ netlist 裡根本不存在「元件總腳數」這個資訊。
 料號、其中 74 種是真正的終端負載，全排除的話 `loads` 欄會接近全空。
 
 **防法**：端點四態（見 `models.md`）。`unclassified` 是**預設值不是結論**，
-仍留在 CSV 裡但帶 `endpoint:unclassified` caveat。
+仍留在 CSV 裡，狀態由 `endpoint_kind` 欄呈現。⚠️ 它**不降級 `confidence`**
+——路徑本身由 netlist 完整支持，未分類的是覆蓋率缺口不是路徑證據不足。
 
 ## 15. 控制腳被當成訊號路徑
 
