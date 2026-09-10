@@ -10,6 +10,116 @@ git show v1.0.0                        # 該版的完整說明
 
 ---
 
+## 從 v0 升級到最新版
+
+```bash
+cd <你的>/.claude/skills/netlist-deep-dive
+git pull
+python scripts/ndd.py migrate "C:/path/to/analysis" --run
+```
+
+跑完就可以開始問電路問題。`migrate --run` 會：
+
+| # | 動作 |
+|---|---|
+| 1 | `bom_kind` → `bom_scope`、補齊新欄位（原檔備份為 `ndd.json.v0.bak`） |
+| 2 | **還原 v0 內建模型** —— 只加這個專案實際用得到的，只合併不覆蓋 |
+| 3 | 清掉欄位已變動的 `export/` 與 `REVIEW.md` |
+| 4 | 依序跑 export → datasheets → audit → mate → trace → coverage → blockers → manifest → review |
+| 5 | 寫出 `SETUP.md` 升級報告 |
+
+**為什麼要還原模型**：v0 把那四個模型內建自動載入，不還原等於靜默改變行為
+（追跡會突然停在那些 IC 上）。`migrate` 的職責是**在新語意下保持原有行為**。
+寫進你的 `models.json` 之後它們就是**你的宣告**，`audit` 與 `REVIEW.md` 會把
+它們列進要複核的清單 —— 這和「模型不自動載入」不衝突：那條原則反對的是
+**執行期默默生效**。
+
+⚠️ 還原的模型 `pin_roles` 留空、`direction` 是依元件型別判定的，**仍須複核**。
+
+**預設不下載 datasheet**（要下載加 `--datasheets`）—— 升級指令不該無預警發網路
+請求，缺的會列在 `MISSING.md`。
+
+**唯一會擋下來的情況**：你手寫過 `models.json` 且還是舊的 `pairs` schema。
+**不做自動轉換** —— 舊 schema 沒有方向資訊，機械轉成 `transfer` 只會把「單向
+元件可雙向走」的錯誤帶進新 schema，而那正是這次要修的東西。改寫後再跑一次。
+
+**實測**：4 板專案（3761 parts、63 條斷言）一個指令跑完，`audit` PASS，
+4 個模型全部還原，`SETUP.md` 列出 `X-Band PGA chip`（擋 1188 條）與
+`SN74LV595`（612 條）為優先建模對象。
+
+**或者：重新 init**
+
+手寫設定不多（沒有 `assertions` / `role_rules` / `net_normalize`）就直接
+`init --run --force` 更省事。⚠️ 會覆蓋 `ndd.json`，手寫的斷言與命名規則會消失。
+
+### 預期的落差
+
+升級後**結論會變少、標記會變多**：v0 產出的某些鏈路建立在未經方向驗證的模型
+上。`coverage` 與 `REVIEW.md` 會告訴你差在哪裡。
+
+---
+
+## v1.6.0 — 擋住「init 覆蓋掉手寫設定」這條資料遺失路徑
+
+其他工程師的第一次使用方式是「貼 GitHub 網址給 AI 安裝，再到專案資料夾跑
+init」。照這個習慣，拿到新版之後很可能又在**既有的 v0 專案**上跑 init ——
+而舊版的訊息是：
+
+```
+ndd.json 已存在，要覆蓋請加 --force
+```
+
+**那句話等於教使用者刪掉自己手寫的東西。** 實測一個真實專案照做會毀掉
+63 條斷言、2 條命名規則、12 條 net 正規化規則、16 組對接、2 個 trace 起點。
+
+改為：
+
+- 偵測到 **v0 格式**（用 `bom_kind`）→ 直接拒絕，**`--force` 也不放行**，
+  並列出**會失去什麼**，指向 `ndd.py migrate --run`
+- v1 格式但有手寫內容 → 列出內容並要求 `--force`，同時提示 migrate 才是
+  升級的正路
+- `init --plan` 在資料夾已有 `ndd.json` 時先提醒
+
+新增 **`ndd.py version`**：印出版本、安裝位置與 git 描述，讓人（與 AI）能確認
+裝的是哪一版、怎麼更新。用壓縮檔安裝的會明說「不在 git 工作區」——那表示要
+重新 clone 而不是 `git pull`。
+
+README 補上「更新」章節（含非 git 安裝的情況），`SKILL.md` 的 Phase 0 開頭加上
+「先確認這個資料夾是不是已經建過專案」。
+
+---
+
+## v1.5.0 — `migrate --run`：v0 專案一鍵升級
+
+原本要三步（`migrate` → `models --add` → 手動重跑流程）。合併成一個指令：
+
+```bash
+python scripts/ndd.py migrate "C:/path/to/analysis" --run
+```
+
+三個設計判斷：
+
+1. **還原 v0 內建模型，但只加專案用得到的。** v0 那四個模型是自動載入的，
+   不還原等於靜默改變行為（追跡會突然停在那些 IC 上）。`migrate` 的職責是
+   **在新語意下保持原有行為**。用料號比對挑出用得到的，**只合併不覆蓋**。
+
+   這和「模型不自動載入」不衝突：那條原則反對的是**執行期默默生效**；這裡是
+   一次性寫進使用者自己的 `models.json`，之後 `audit` / `REVIEW.md` 會列進
+   複核清單。
+
+2. **預設不下載 datasheet**（`--datasheets` 才啟用）。升級指令不該無預警發
+   網路請求；缺的列在 `MISSING.md`，按需補齊。
+
+3. **衍生產物直接覆蓋，但在報告裡列出。** `export/` 與 `REVIEW.md` 的欄位已
+   變動，無法沿用。
+
+**唯一會擋下來的**：使用者手寫過 `pairs` 模型。**不做自動轉換** —— 舊 schema
+沒有方向資訊，轉了就是把「單向元件可雙向走」的錯誤帶進新 schema。
+
+實測 4 板專案一個指令跑完、`audit` PASS、4 個模型全部還原。
+
+---
+
 ## v1.4.0 — 「哪顆值得建模」改成用數的
 
 原本的規則是「同一顆 IC 被追第二次以上才值得建模型」。使用者指出：**AI 要怎麼
@@ -271,53 +381,6 @@ v0 的 `tests/` 不存在，而 README 的賣點是「把驗證本身也工具�
 輸出格式變動：`signal_chain.csv` 新增 `caveats` / `confidence` / `endpoint_kind`
 且 `loads` 欄語意改變；`pinmap_<board>.csv` 新增 `bom_scope`、`stuffed` 新增
 `UNKNOWN` / `AMBIGUOUS`；新增 `topology_hint.csv`。
-
-### 從 v0 專案升級（一個指令）
-
-```bash
-cd <你的>/.claude/skills/netlist-deep-dive
-git pull
-python scripts/ndd.py migrate "C:/path/to/analysis" --run
-```
-
-跑完就可以開始問電路問題。`migrate --run` 會：
-
-| # | 動作 |
-|---|---|
-| 1 | `bom_kind` → `bom_scope`、補齊新欄位（原檔備份為 `ndd.json.v0.bak`） |
-| 2 | **還原 v0 內建模型** —— 只加這個專案實際用得到的，只合併不覆蓋 |
-| 3 | 清掉欄位已變動的 `export/` 與 `REVIEW.md` |
-| 4 | 依序跑 export → datasheets → audit → mate → trace → coverage → blockers → manifest → review |
-| 5 | 寫出 `SETUP.md` 升級報告 |
-
-**為什麼要還原模型**：v0 把那四個模型內建自動載入，不還原等於靜默改變行為
-（追跡會突然停在那些 IC 上）。`migrate` 的職責是**在新語意下保持原有行為**。
-寫進你的 `models.json` 之後它們就是**你的宣告**，`audit` 與 `REVIEW.md` 會把
-它們列進要複核的清單 —— 這和「模型不自動載入」不衝突：那條原則反對的是
-**執行期默默生效**。
-
-⚠️ 還原的模型 `pin_roles` 留空、`direction` 是依元件型別判定的，**仍須複核**。
-
-**預設不下載 datasheet**（要下載加 `--datasheets`）—— 升級指令不該無預警發網路
-請求，缺的會列在 `MISSING.md`。
-
-**唯一會擋下來的情況**：你手寫過 `models.json` 且還是舊的 `pairs` schema。
-**不做自動轉換** —— 舊 schema 沒有方向資訊，機械轉成 `transfer` 只會把「單向
-元件可雙向走」的錯誤帶進新 schema，而那正是這次要修的東西。改寫後再跑一次。
-
-**實測**：4 板專案（3761 parts、63 條斷言）一個指令跑完，`audit` PASS，
-4 個模型全部還原，`SETUP.md` 列出 `X-Band PGA chip`（擋 1188 條）與
-`SN74LV595`（612 條）為優先建模對象。
-
-**或者：重新 init**
-
-手寫設定不多（沒有 `assertions` / `role_rules` / `net_normalize`）就直接
-`init --run --force` 更省事。⚠️ 會覆蓋 `ndd.json`，手寫的斷言與命名規則會消失。
-
-### 預期的落差
-
-升級後**結論會變少、標記會變多**：v0 產出的某些鏈路建立在未經方向驗證的模型
-上。`coverage` 與 `REVIEW.md` 會告訴你差在哪裡。
 
 ### 已知限制
 
