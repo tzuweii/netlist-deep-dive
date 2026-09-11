@@ -681,5 +681,45 @@ class TestAssertionsUnderAmbiguity(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestNetClass(unittest.TestCase):
+    """`Fabric.cls` 的地線／電源軌命名慣例。
+
+    曾經只認 `GND` / `*_GND` 與帶 `VDD`/`VCC` 的名字，於是 `AGND`、`PGND`、
+    `GND_A`、`3P4V_P`、`6V_C`、`28V_A` 全被判成 SIG。後果有兩層，而且都**不會
+    報錯**：`mate` 把電源腳對電源腳算成矛盾，排名因此定不了案；`pin_roles`
+    宣告的 VSS/VDD 對不上 netlist，封裝判定變成 conflict。
+    """
+
+    def test_ground_aliases(self):
+        for n in ("GND", "AGND", "DGND", "PGND", "PGND_R", "GND_A", "GND_B",
+                  "GND_EARTH", "28V_GND_PM_2", "GND1"):
+            self.assertEqual(Fabric.cls(n), "GND", n)
+
+    def test_rail_naming_conventions(self):
+        for n, want in (("3P4V_P", "PWR:3P4V"), ("3P3V_C", "PWR:3P3V"),
+                        ("6V_C", "PWR:6V"), ("28V_A", "PWR:28V"),
+                        ("VDD_3V3_P", "PWR:3V3"), ("MRAM_3V3_DPU", "PWR:3V3"),
+                        ("FPGA_MGTAVTT_1V2_DPU", "PWR:1V2")):
+            self.assertEqual(Fabric.cls(n), want, n)
+
+    def test_control_signals_beat_rails(self):
+        """名字帶電壓不代表是電源軌 —— enable / power-good 必須是 SIG。"""
+        for n in ("28V_EN_PM_2", "TX_EN", "TX_PG", "3P3V_PG_DPU", "VDD_3V3_EN"):
+            self.assertEqual(Fabric.cls(n), "SIG", n)
+
+    def test_no_substring_false_positives(self):
+        """只認整個 token。`TX_PGA_LOAD` 含 `PG`，但它是訊號不是 power-good。"""
+        for n in ("TX_PGA_LOAD", "TX_CLK_PS_P", "180DEG_BIT_TX1",
+                  "FPGA_FLAG_P", "SERDESA_RTN"):
+            self.assertEqual(Fabric.cls(n), "SIG", n)
+
+    def test_bare_vdd_without_voltage(self):
+        for n in ("A_VDD25", "XO_100MHZ_VDD_DPU", "TCXO_100MHZ_VDD"):
+            self.assertEqual(Fabric.cls(n), "PWR", n)
+
+    def test_none_stays_none(self):
+        self.assertIsNone(Fabric.cls(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

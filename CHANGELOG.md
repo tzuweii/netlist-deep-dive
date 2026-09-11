@@ -59,6 +59,62 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v1.8.0 — `Fabric.cls` 認得業界通用的地線／電源軌命名
+
+`cls` 是**跨板唯一可靠的不變量**，`mate` 的矛盾計分與 `pin_roles` 的封裝判定
+都建立在它身上。但它原本只認兩種寫法：`GND` / `*_GND`，以及名字裡有
+`VDD`/`VCC` 的。
+
+於是這些全被判成 `SIG`：
+
+| 寫法 | 例子 |
+|---|---|
+| 前綴地 | `AGND`、`DGND`、`PGND`、`PGND_R` |
+| 後綴地 | `GND_A`、`GND_B`、`GND_EARTH` |
+| 夾在中間的地 | `28V_GND_PM_2` |
+| 數字電壓軌 | `3P4V_P`、`6V_C`、`28V_A`、`MRAM_3V3_DPU` |
+
+**後果有兩層，而且都不會報錯**：
+
+1. `mate` 把「電源腳對電源腳」算成矛盾。實測一個 4 板專案，某塊板用 `AGND`
+   （1052 支腳），它與另外三塊板之間的 5 組對接全部卡在 `ambiguous`，矛盾腳
+   數 152 / 40 / 30 / 20 —— 看起來像是佈局真的對不上，其實是名字沒認得。
+2. `pin_roles` 宣告的 VSS/VDD 對不上 netlist，封裝判定回報 `conflict`。
+   使用者照 datasheet 填對了，工具卻說他填錯。
+
+### 改法
+
+三條 **token-based** 正規式，寫死在 `Fabric` 上（這是 EDA 通用慣例，不是專案
+私有規則，不該丟給設定檔）：
+
+```python
+_RX_GND  = r"(^|_)[A-Z]?GND\d*(_|$)"
+_RX_CTRL = r"(^|_)(EN|PG|PGOOD|PWRGD|POK)(_|$)"
+_RX_RAIL = r"(^|_)(\d+P\d+V|\d+V\d+|\d+V)(_|$)"
+```
+
+⚠️ **只比對整個 token，不做子字串比對** —— `TX_PGA_LOAD` 不可以因為含有 `PG`
+就被當成 power-good。⚠️ **控制訊號優先於電源軌** —— `28V_EN_PM_2` 是 enable，
+不是 28 V 軌；原本只擋字尾 `_EN`，擋不掉夾在中間的。
+
+### 回歸驗證
+
+同一個 4 板專案（3761 parts、63 條斷言），改前改後對跑：
+
+| 產物 | 結果 |
+|---|---|
+| `pinmap_{fe,ecu,dpu,int}.csv` | **byte-identical** |
+| `signal_chain.csv` | **byte-identical** |
+| 原本就定案的 11 組對接排名 | **完全未變** |
+| 5 組卡住的對接 | 4 組矛盾降到 0、升為 `inferred`；1 組從 40 降到 12 |
+| `audit` | 6 筆封裝 `conflict` 消失 -> PASS |
+
+剩下那 1 組沒有被「修好」，因為它**不是工具的問題**：兩塊板對同一支連接器
+腳位的網路取名為 `3P4V_C` 與 `3P3V_C_VDD_X`，電壓標示本身就對不起來。工具
+把它留在 `ambiguous` 是正確行為。
+
+---
+
 ## v1.7.0 — 文件全面盤查；刪除 SPEC.md
 
 跑了一次全文件對照，修掉三份文件裡描述**已被推翻的決策**的段落：

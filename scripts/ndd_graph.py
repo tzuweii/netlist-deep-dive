@@ -223,19 +223,35 @@ class Fabric(object):
             n = rx.sub(rep, n)
         return n
 
+    # 地線與電源軌的命名慣例 —— 這是 **EDA 通用慣例**，不是某個專案的私有規則，
+    # 所以寫死在這裡而不是丟給設定檔。⚠️ 只認「整個 token」，不做子字串比對：
+    # `TX_PGA_LOAD` 不可以因為含有 `PG` 就被當成 power-good。
+    _RX_GND = re.compile(r"(^|_)[A-Z]?GND\d*(_|$)")
+    _RX_CTRL = re.compile(r"(^|_)(EN|PG|PGOOD|PWRGD|POK)(_|$)")
+    _RX_RAIL = re.compile(r"(^|_)(\d+P\d+V|\d+V\d+|\d+V)(_|$)")
+
     @staticmethod
     def cls(n):
-        """腳位類別 —— 跨板唯一可靠的不變量。"""
+        """腳位類別 —— 跨板唯一可靠的不變量。
+
+        認得的地線寫法：`GND` / `AGND` / `DGND` / `PGND` / `GND_A` /
+        `GND_EARTH` / `28V_GND_PM_2`。認得的電源軌寫法：帶 `VDD`/`VCC` 的，
+        以及 `3P3V_P` / `1P8V` / `28V_A` / `6V_C` / `MRAM_3V3_DPU` 這類
+        「數字 + V」慣例。
+
+        ⚠️ 控制訊號優先於電源軌：`28V_EN_PM_2` 是 enable，不是 28 V 軌。
+        """
         if n is None:
             return None
         u = n.upper()
-        if u == "GND" or u.endswith("_GND"):
+        if u == "GND" or Fabric._RX_GND.search(u):
             return "GND"
-        if u.endswith(("_EN", "_PG", "_PGOOD")):    # 名字帶 VDD 但其實是控制訊號
+        # 名字帶電壓或 VDD，但其實是 enable / power-good 之類的控制訊號
+        if u.endswith(("_EN", "_PG", "_PGOOD")) or Fabric._RX_CTRL.search(u):
             return "SIG"
-        m = re.search(r"(\d+V\d+|\d+V\b)", u)
-        if m and ("VDD" in u or "VCC" in u or u.startswith(("+", "V"))):
-            return "PWR:" + m.group(1)
+        m = Fabric._RX_RAIL.search(u)
+        if m:
+            return "PWR:" + m.group(2)
         if "VDD" in u or "VCC" in u:
             return "PWR"
         return "SIG"
