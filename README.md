@@ -14,6 +14,31 @@ pinmap CSV、跨板端到端訊號鏈、階層與腳位功能名、功能拓樸�
 
 ---
 
+## 👋 如果你是被貼了這個網址的 AI
+
+使用者大概是說了「**更新這個 skill，然後幫我升級 `<我的分析資料夾>`**」。
+
+完整做法在 **[`UPGRADING.md`](UPGRADING.md)** —— 先讀它，照順序做完。
+
+最短版本：
+
+```bash
+python <既有安裝>/scripts/ndd.py version "<分析資料夾>"   # 裝哪一版、專案缺什麼、下一步是什麼
+cd <既有安裝> && git pull && python -m unittest discover -s tests
+python scripts/ndd.py migrate "<分析資料夾>" --run
+```
+
+三個一定要知道的地雷：
+
+1. **絕對不要對既有資料夾跑 `init`** —— 會覆蓋掉使用者手寫的斷言、命名規則、
+   對接關係。升級一律用 `migrate`。
+2. **新的大版本可能需要新的輸入檔**（v2.0 起每塊板多一份 `.DSN`）。先讀
+   `CHANGELOG.md` 對應版本的「升級」小節，缺什麼就跟使用者要。
+3. **「跑完了」不等於「都成功了」** —— 讀 `SETUP.md`，把沒做到的逐條轉述，
+   不要只回報「升級完成」。
+
+---
+
 ## 為什麼需要它
 
 netlist 是逐 net 的文字檔，人工追一條跨板訊號要翻很多層；而分析結果寫成文件之後，
@@ -43,10 +68,24 @@ python scripts/ndd.py version           # 確認裝的是哪一版
 
 ## 更新
 
-**先確認裝在哪、是哪一版：**
+**最省事的做法 —— 把這段貼給 AI（每一版都用同一段）：**
+
+```
+更新這個 skill，然後幫我升級 <我的分析資料夾>
+https://github.com/tzuweii/netlist-deep-dive
+```
+
+它會讀到 [`UPGRADING.md`](UPGRADING.md) 並照著做：更新 skill、跑測試、看你的
+專案缺什麼、缺新輸入檔就先跟你要、再用 `migrate` 就地升級，最後把沒做完的
+逐條講給你聽。
+
+下面是手動的做法。
+
+**先確認裝在哪、是哪一版、專案要不要升級：**
 
 ```bash
-python scripts/ndd.py version
+python scripts/ndd.py version                      # skill 本身
+python scripts/ndd.py version "C:/path/to/analysis"   # 那個專案缺什麼、下一步是什麼
 ```
 
 **如果是 git clone 裝的：**
@@ -144,7 +183,8 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 
 | 檔案 | 說明 |
 |---|---|
-| `CHANGELOG.md` | 版本紀錄與 v0 對比 |
+| `UPGRADING.md` | **升級流程（給 AI 照著做）**，版本無關；附發新版的檢查清單 |
+| `CHANGELOG.md` | 版本紀錄與 v0 對比；每版的「升級」小節寫該版特有的步驟 |
 | `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |

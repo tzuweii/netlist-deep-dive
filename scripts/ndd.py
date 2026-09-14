@@ -55,6 +55,16 @@ import ndd_graph                                                   # noqa: E402
 import ndd_pinfn                                                   # noqa: E402
 
 CONFIG_NAME = "ndd.json"
+SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def skill_version():
+    """這份 skill 的版本。讀不到就回 `(未知)`——**不要猜一個數字**。"""
+    vf = os.path.join(SKILL_ROOT, "VERSION")
+    try:
+        return io.open(vf, encoding="utf-8").read().strip() or "(未知)"
+    except Exception:
+        return "(未知)"
 
 # datasheet 直連樣板。⚠️ 只有這幾家實測可用；Microchip 擋 curl (403)、
 # 代理商站 (Mouser/Digikey) 會回 bot-check HTML 而不是 PDF。
@@ -627,13 +637,43 @@ def _guard_existing(d, force):
         raise SystemExit("%s 已存在（無手寫內容）。要重建請加 --force。" % p)
 
 
+def _project_state(d):
+    """某個分析資料夾的升級狀態。給 `version <資料夾>` 與升級流程用。
+
+    ⚠️ **用實際檔案判斷，不是只看版本戳。** 戳記會因為手動編輯、複製資料夾、
+       中途失敗而說謊；「這幾塊板的階層 CSV 到底在不在」不會。
+    """
+    if not os.path.isdir(d):
+        return {"missing_dir": True}
+    p = os.path.join(d, CONFIG_NAME)
+    if not os.path.exists(p):
+        return None
+    try:
+        cfg = json.load(io.open(p, encoding="utf-8"))
+    except Exception as exc:
+        # 壞掉的設定檔要講清楚是壞掉，不要丟 traceback——照著流程做的人
+        # （或 AI）看到 traceback 只會開始亂試。
+        return {"broken": str(exc)}
+    boards = cfg.get("boards") or {}
+    with_h = [k for k in sorted(boards) if _hier_files(d, boards[k])]
+    return {
+        "config": p,
+        "stamp": cfg.get("ndd_version") or "",
+        "legacy_v0": any("bom_kind" in b for b in boards.values()),
+        "boards": sorted(boards),
+        "with_hier": with_h,
+        "without_hier": [k for k in sorted(boards) if k not in with_h],
+        "dsn_in_folder": _scan_dsn(d),
+    }
+
+
 def cmd_version(args):
-    """印出 skill 版本 —— 讓人（與 AI）能確認裝的是哪一版。"""
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ver = "(未知)"
-    vf = os.path.join(root, "VERSION")
-    if os.path.exists(vf):
-        ver = io.open(vf, encoding="utf-8").read().strip()
+    """印出 skill 版本 —— 讓人（與 AI）能確認裝的是哪一版。
+
+    給了資料夾就一併回報那個專案的升級狀態，**並直接說出下一步該下哪個指令**。
+    """
+    root = SKILL_ROOT
+    ver = skill_version()
     rev = ""
     try:
         rev = subprocess.check_output(["git", "-C", root, "describe", "--tags", "--always"],
@@ -645,7 +685,46 @@ def cmd_version(args):
     print("  git      %s" % rev)
     print("")
     print("更新：在上面那個目錄下 `git pull`；不是 git 工作區就重新 clone。")
-    print("既有專案升級：ndd.py migrate <分析資料夾> --run")
+
+    d = os.path.abspath(args.dir) if getattr(args, "dir", None) else None
+    if not d:
+        print("既有專案升級：ndd.py migrate <分析資料夾> --run")
+        print("（加上資料夾路徑可以看那個專案要不要升級：ndd.py version <資料夾>）")
+        return ver
+
+    st = _project_state(d)
+    print("")
+    print("分析資料夾 %s" % d)
+    if st and st.get("missing_dir"):
+        print("  這個路徑不存在。請向使用者確認分析資料夾在哪。")
+        return ver
+    if st and st.get("broken"):
+        print("  %s 讀不起來：%s" % (CONFIG_NAME, st["broken"]))
+        print("  -> 先修好設定檔（或還原備份 %s.*.bak）再升級。" % CONFIG_NAME)
+        return ver
+    if st is None:
+        print("  沒有 %s —— 這個資料夾還沒建過專案。" % CONFIG_NAME)
+        print("  -> 建立：ndd.py init \"%s\" --run" % d)
+        return ver
+    print("  建立時的版本 %s" % (st["stamp"] or "(未標記 —— v2.0 以前建的)"))
+    print("  板子         %d 塊，其中 %d 塊有階層"
+          % (len(st["boards"]), len(st["with_hier"])))
+    if st["without_hier"]:
+        print("  缺階層       %s" % ", ".join(st["without_hier"][:6]))
+        print("  資料夾裡的 .DSN %d 份" % len(st["dsn_in_folder"]))
+    if st["legacy_v0"]:
+        print("  ⚠️ 還是 v0 格式（bom_kind）")
+    need = (st["legacy_v0"] or st["without_hier"]
+            or st["stamp"] != ver)
+    if not need:
+        print("  -> 已是最新，不需要升級。")
+        return ver
+    if st["without_hier"] and not st["dsn_in_folder"]:
+        print("  -> **先向使用者要這幾塊板的 .DSN**，放進這個資料夾，再跑：")
+    else:
+        print("  -> 升級：")
+    print("     ndd.py migrate \"%s\" --run" % d)
+    print("     （**不要**對既有資料夾跑 init —— 會覆蓋手寫設定）")
     return ver
 
 
@@ -705,6 +784,9 @@ def cmd_init(args):
 
     cfg = {
         "project": os.path.basename(d.rstrip("\\/")) or "unnamed",
+        # 建立這個專案的 skill 版本。升級時用來說清楚「從哪一版到哪一版」；
+        # **判斷該做什麼一律看實際檔案**（見 `_project_state`），戳記只是說明。
+        "ndd_version": skill_version(),
         "boards": boards_cfg,
         "mates": [r["mate"] for r in acc],
         # ⚠️ 未出現在骨架裡的欄位，使用者不會知道它存在 —— 一律寫出空殼。
@@ -1670,6 +1752,11 @@ def cmd_migrate(args):
         run_todo.append("\n".join(
             [head] + ["        - " + x for x in syms["conflict_lines"][:10]]))
 
+    # 升級完成才蓋新戳記——中途失敗時戳記要維持舊的，不然下次會以為升過了。
+    cfg["ndd_version"] = skill_version()
+    with io.open(cfg_path, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(cfg, indent=2, ensure_ascii=False))
+
     txt = UPGRADE_TMPL.format(
         date=datetime.date.today().isoformat(),
         changes="\n".join("- %s" % c for c in changed) or "- （設定已是 v1 格式）",
@@ -2222,7 +2309,9 @@ def main(argv=None):
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)
-    p = sub.add_parser("version"); p.set_defaults(func=cmd_version, noproj=True)
+    p = sub.add_parser("version")
+    p.add_argument("dir", nargs="?", help="分析資料夾；給了就一併回報它要不要升級")
+    p.set_defaults(func=cmd_version, noproj=True)
     p = sub.add_parser("migrate"); p.add_argument("dir", nargs="?")
     p.add_argument("--run", action="store_true", help="升級設定後一路跑完所有流程")
     p.add_argument("--no-models", action="store_true", help="不還原 v0 的內建模型")

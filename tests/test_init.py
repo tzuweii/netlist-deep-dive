@@ -303,6 +303,26 @@ class TestMigrate(unittest.TestCase):
         self.assertIn("--no-models", txt)
 
 
+def _v18_folder(two_boards=False):
+    """建一個 v1.8 形狀的專案：有 .asc / BOM / 手寫設定，但沒有階層。"""
+    d = _folder(two_boards=two_boards)
+    ndd.main(["init", d, "--run", "--no-datasheets"])
+    p = os.path.join(d, "ndd.json")
+    cfg = json.load(io.open(p, encoding="utf-8"))
+    for b in cfg["boards"].values():
+        for f in ("dsn", "hier_parts", "hier_nodes"):
+            b.pop(f, None)
+    cfg.pop("ndd_version", None)
+    # 手寫設定——升級後必須一個字都沒變
+    cfg["net_normalize"] = [["^OLD_", "NEW_"]]
+    cfg["part_package"] = {"ADC_A": "PKG8"}
+    cfg["trace"]["slot_pattern"] = r"^J(\d)01$"
+    io.open(p, "w", encoding="utf-8").write(
+        json.dumps(cfg, ensure_ascii=False, indent=2))
+    shutil.rmtree(os.path.join(d, "hier"), ignore_errors=True)
+    return d, p
+
+
 class TestMigrateToV2(unittest.TestCase):
     """v1.8 -> v2.0：把階層補進**既有**專案。
 
@@ -313,22 +333,7 @@ class TestMigrateToV2(unittest.TestCase):
     """
 
     def _v18(self, two_boards=False):
-        """建一個 v1.8 形狀的專案：有 .asc / BOM / 手寫設定，但沒有階層。"""
-        d = _folder(two_boards=two_boards)
-        ndd.main(["init", d, "--run", "--no-datasheets"])
-        p = os.path.join(d, "ndd.json")
-        cfg = json.load(io.open(p, encoding="utf-8"))
-        for b in cfg["boards"].values():
-            for f in ("dsn", "hier_parts", "hier_nodes"):
-                b.pop(f, None)
-        # 手寫設定——升級後必須一個字都沒變
-        cfg["net_normalize"] = [["^OLD_", "NEW_"]]
-        cfg["part_package"] = {"ADC_A": "PKG8"}
-        cfg["trace"]["slot_pattern"] = r"^J(\d)01$"
-        io.open(p, "w", encoding="utf-8").write(
-            json.dumps(cfg, ensure_ascii=False, indent=2))
-        shutil.rmtree(os.path.join(d, "hier"), ignore_errors=True)
-        return d, p
+        return _v18_folder(two_boards)
 
     def _boards(self, p):
         return json.load(io.open(p, encoding="utf-8"))["boards"]
@@ -474,6 +479,76 @@ class TestMigrateToV2(unittest.TestCase):
         finally:
             ndd_hier.convert = real
         self.assertEqual(calls, [])
+
+
+class TestVersionAndUpgradeEntryPoint(unittest.TestCase):
+    """`ndd.py version <資料夾>` 是升級流程的入口。
+
+    使用者的用法是「把 repo 網址貼給 AI，說幫我升級」——所以**工具自己要能講出
+    下一步該下哪個指令**。講不出來，AI 就會去猜，而最容易猜到的錯誤答案
+    （對既有資料夾跑 `init`）剛好會毀掉使用者手寫的設定。
+    """
+
+    def _out(self, argv):
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            ndd.main(argv)
+        return buf.getvalue()
+
+    def test_init_stamps_the_version(self):
+        d = _folder(two_boards=False)
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        self.assertEqual(cfg["ndd_version"], ndd.skill_version())
+
+    def test_migrate_restamps_after_upgrading(self):
+        d, p = _v18_folder()
+        ndd.main(["migrate", d, "--run"])
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        self.assertEqual(cfg["ndd_version"], ndd.skill_version())
+
+    def test_empty_folder_points_at_init_not_migrate(self):
+        d = tempfile.mkdtemp(prefix="ndd_empty_")
+        try:
+            out = self._out(["version", d])
+            self.assertIn("init", out)
+            self.assertIn("還沒建過專案", out)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_project_without_dsn_says_to_ask_for_it_first(self):
+        """**缺輸入檔要先講**，否則 AI 會直接 migrate，得到一個沒有階層的結果
+        卻以為升級完成了。"""
+        d, _p = _v18_folder()
+        for f in os.listdir(d):
+            if f.lower().endswith(".dsn"):
+                os.remove(os.path.join(d, f))
+        out = self._out(["version", d])
+        self.assertIn(".DSN", out)
+        self.assertIn("migrate", out)
+
+    def test_up_to_date_project_says_so(self):
+        d = _folder(two_boards=False)
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        self.assertIn("已是最新", self._out(["version", d]))
+
+    def test_state_comes_from_files_not_from_the_stamp(self):
+        """戳記會說謊（手動編輯、複製資料夾、中途失敗），檔案不會。"""
+        d = _folder(two_boards=False)
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        shutil.rmtree(os.path.join(d, "hier"), ignore_errors=True)
+        st = ndd._project_state(d)
+        self.assertEqual(st["stamp"], ndd.skill_version(), "戳記還在")
+        self.assertEqual(st["with_hier"], [], "但檔案已經不在了")
+        self.assertNotIn("已是最新", self._out(["version", d]))
+
+    def test_never_tells_you_to_init_an_existing_project(self):
+        """對既有資料夾跑 init 會毀掉手寫設定——這個字不該出現在建議裡。"""
+        d, _p = _v18_folder()
+        out = self._out(["version", d])
+        self.assertIn("migrate", out)
+        self.assertIn("不要", out)
 
 
 if __name__ == "__main__":
