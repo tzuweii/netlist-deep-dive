@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 sys.path.insert(0, HERE)
 
 import fixtures                                                # noqa: E402
+import ndd_pinfn                                               # noqa: E402
 import ndd                                                     # noqa: E402
 
 
@@ -45,9 +46,17 @@ def _folder(two_boards=True, ambiguous_bom=False, with_dsn=True):
             hd = os.path.join(d, "_hier_fixture")
             if not os.path.isdir(hd):
                 os.makedirs(hd)
+            # 給 IC 一個功能名與一支低有效腳，symbol 入庫那一步才有東西可做
+            bs = chr(92)
+            names = {}
+            for rd in parts:
+                if rd.startswith("U"):
+                    names[(rd, "1")] = "AIN0"
+                    names[(rd, "2")] = bs.join(["", "R", "E", "S", "E", "T", ""])
             mapping[os.path.abspath(dsn)] = fixtures.write_hier(
                 os.path.join(hd, "%s_parts.csv" % key),
-                os.path.join(hd, "%s_nodes.csv" % key), parts, nets)
+                os.path.join(hd, "%s_nodes.csv" % key), parts, nets,
+                pin_names=names)
 
     board("board_a", {"JX": "Conn_HDR", "U1": "PKG8"},
           {"SIG_%d" % i: [("JX", str(i)), ("U1", str(min(i, 8)))] for i in range(1, 9)},
@@ -292,6 +301,179 @@ class TestMigrate(unittest.TestCase):
         ndd.main(["migrate", d, "--run", "--no-models"])
         txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
         self.assertIn("--no-models", txt)
+
+
+class TestMigrateToV2(unittest.TestCase):
+    """v1.8 -> v2.0：把階層補進**既有**專案。
+
+    ⚠️ `migrate` 與 `init` 的分界就是這一組測試在守的：`init` 遇到對不上的
+       `.DSN` 要硬失敗（還沒有東西存在，停下來零成本）；`migrate` 不行——
+       那裡已經有一個能用的專案，為了一份對不上的 `.DSN` 把它弄壞，比沒有
+       階層更糟。
+    """
+
+    def _v18(self, two_boards=False):
+        """建一個 v1.8 形狀的專案：有 .asc / BOM / 手寫設定，但沒有階層。"""
+        d = _folder(two_boards=two_boards)
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        p = os.path.join(d, "ndd.json")
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        for b in cfg["boards"].values():
+            for f in ("dsn", "hier_parts", "hier_nodes"):
+                b.pop(f, None)
+        # 手寫設定——升級後必須一個字都沒變
+        cfg["net_normalize"] = [["^OLD_", "NEW_"]]
+        cfg["part_package"] = {"ADC_A": "PKG8"}
+        cfg["trace"]["slot_pattern"] = r"^J(\d)01$"
+        io.open(p, "w", encoding="utf-8").write(
+            json.dumps(cfg, ensure_ascii=False, indent=2))
+        shutil.rmtree(os.path.join(d, "hier"), ignore_errors=True)
+        return d, p
+
+    def _boards(self, p):
+        return json.load(io.open(p, encoding="utf-8"))["boards"]
+
+    def test_hierarchy_is_added_and_handwritten_config_survives(self):
+        d, p = self._v18()
+        self.assertEqual(ndd.main(["migrate", d, "--run"]), 0)
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        b = cfg["boards"]["board_a"]
+        self.assertEqual(b["hier_parts"], "hier/board_a_parts.csv")
+        self.assertTrue(os.path.exists(os.path.join(d, b["hier_parts"])))
+        self.assertIsNotNone(ndd.Project(p).hier("board_a"), "補完要讀得到")
+        # 手寫的東西原封不動
+        self.assertEqual(cfg["net_normalize"], [["^OLD_", "NEW_"]])
+        self.assertEqual(cfg["part_package"], {"ADC_A": "PKG8"})
+        self.assertEqual(cfg["trace"]["slot_pattern"], r"^J(\d)01$")
+
+    def test_backs_up_config_before_touching_it(self):
+        d, p = self._v18()
+        ndd.main(["migrate", d, "--run"])
+        bak = p + ".pre-v2.bak"
+        self.assertTrue(os.path.exists(bak))
+        self.assertNotIn("hier_parts", io.open(bak, encoding="utf-8").read(),
+                         "備份要是**動之前**的樣子")
+
+    def test_symbol_pin_names_land_in_the_cache(self):
+        d, p = self._v18()
+        ndd.main(["migrate", d, "--run"])
+        rows = ndd_pinfn.load_cache(d)[1]
+        sym = {(r["part"], r["pin"]): r for r in rows
+               if r["resolved_by"] == ndd_pinfn.SYMBOL}
+        self.assertEqual(sym[("ADC_A", "1")]["pin_name"], "AIN0")
+        self.assertEqual(sym[("ADC_A", "2")]["pin_name"], "RESET")
+        self.assertEqual(sym[("ADC_A", "2")]["active_low"], "1")
+
+    def test_existing_datasheet_rows_are_not_touched(self):
+        """快取裡的 datasheet 原文是人工確認過、重建不回來的資產。"""
+        d, p = self._v18()
+        ndd_pinfn.append_cache(d, {
+            "part": "ADC_A", "pin": "1", "pin_name": "AIN0",
+            "text": "Analog input 0", "source_file": "adc.pdf", "page": "12",
+            "sha256": "a" * 64, "resolved_by": ndd_pinfn.NOT_APPLICABLE})
+        ndd.main(["migrate", d, "--run"])
+        ds = [r for r in ndd_pinfn.load_cache(d)[1]
+              if r["resolved_by"] == ndd_pinfn.NOT_APPLICABLE]
+        self.assertEqual(len(ds), 1)
+        self.assertEqual(ds[0]["text"], "Analog input 0")
+        self.assertEqual(ds[0]["page"], "12")
+
+    def test_no_dsn_in_folder_still_upgrades_everything_else(self):
+        """沒有 .DSN 不是錯誤——專案照舊可用，只是沒有階層。"""
+        d, p = self._v18()
+        for f in os.listdir(d):
+            if f.lower().endswith(".dsn"):
+                os.remove(os.path.join(d, f))
+        self.assertEqual(ndd.main(["migrate", d, "--run"]), 0)
+        self.assertNotIn("hier_parts", self._boards(p)["board_a"])
+        self.assertIsNone(ndd.Project(p).hier("board_a"))
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("階層", txt)
+        self.assertTrue(os.path.exists(os.path.join(d, "export")),
+                        "其餘流程照樣要跑完")
+
+    def test_mismatched_dsn_leaves_that_board_without_hierarchy(self):
+        """對帳不過的板**不寫入**階層欄位——寧可看得見地缺，不要看不見地錯。"""
+        d, p = self._v18(two_boards=True)
+        nodes = os.path.join(d, "_hier_fixture", "board_b_nodes.csv")
+        lines = io.open(nodes, encoding="utf-8").read().splitlines(True)
+        io.open(nodes, "w", encoding="utf-8", newline="").write("".join(lines[:-1]))
+        self.assertEqual(ndd.main(["migrate", d, "--run"]), 0,
+                         "一塊板對不上，不該讓整個升級失敗")
+        bs = self._boards(p)
+        self.assertIn("hier_parts", bs["board_a"], "對得上的照樣補上")
+        self.assertNotIn("hier_parts", bs["board_b"], "對不上的不可寫入")
+        pj = ndd.Project(p)
+        self.assertIsNotNone(pj.hier("board_a"))
+        self.assertIsNone(pj.hier("board_b"))
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("階層未補上", txt, "沒補上要跟補上的一樣顯眼")
+
+    def _conflict_project(self):
+        """同一料號的兩顆 IC，symbol 腳位名不一致——真實板子上實際發生過。"""
+        d = tempfile.mkdtemp(prefix="ndd_conf_")
+        parts = {"JX": "Conn_HDR", "U1": "PKG8", "U2": "PKG8"}
+        nets = {"SIG_%d" % i: [("JX", str(i)), ("U1", str(i)), ("U2", str(i))]
+                for i in range(1, 9)}
+        fixtures.write_asc(os.path.join(d, "b.asc"), parts, nets)
+        fixtures.write_bom(os.path.join(d, "b.xlsx"), [
+            {"Part Reference": "JX", "Manufacturer_PN": "CONN_X"},
+            {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"},
+            {"Part Reference": "U2", "Manufacturer_PN": "ADC_A"}])
+        dsn = os.path.join(d, "b.DSN")
+        io.open(dsn, "w", encoding="utf-8").write("stub")
+        hd = os.path.join(d, "_hf")
+        os.makedirs(hd)
+        _RESTORE.append(fixtures.stub_convert({os.path.abspath(dsn):
+            fixtures.write_hier(os.path.join(hd, "b_parts.csv"),
+                                os.path.join(hd, "b_nodes.csv"), parts, nets,
+                                pin_names={("U1", "1"): "AIN0",
+                                           ("U2", "1"): "VREF"})}))
+        ndd.main(["init", d, "--run", "--no-datasheets"])
+        p = os.path.join(d, "ndd.json")
+        cfg = json.load(io.open(p, encoding="utf-8"))
+        for b in cfg["boards"].values():
+            for f in ("dsn", "hier_parts", "hier_nodes"):
+                b.pop(f, None)
+        io.open(p, "w", encoding="utf-8").write(
+            json.dumps(cfg, ensure_ascii=False, indent=2))
+        shutil.rmtree(os.path.join(d, "hier"), ignore_errors=True)
+        return d
+
+    def test_symbol_name_conflicts_reach_the_upgrade_report(self):
+        """⚠️ 這條在補：升級報告曾經在**有衝突時**才炸（NameError），而合成
+        fixture 從來不產生衝突，所以整組測試全綠、真實專案一跑就掛。
+        **只在例外情況才走到的分支，要有測試專門走它。**"""
+        d = self._conflict_project()
+        self.assertEqual(ndd.main(["migrate", d, "--run"]), 0)
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn("腳位名不一致", txt)
+        self.assertIn("ADC_A", txt)
+        self.assertIn("AIN0", txt)
+        self.assertIn("VREF", txt)
+        # 衝突的那一筆不可寫進快取
+        sym = [r for r in ndd_pinfn.load_cache(d)[1]
+               if r["resolved_by"] == ndd_pinfn.SYMBOL and r["pin"] == "1"]
+        self.assertEqual(sym, [], "不一致就不寫入，也不可挑一個")
+
+    def test_no_hier_flag_skips_conversion_entirely(self):
+        d, p = self._v18()
+        self.assertEqual(ndd.main(["migrate", d, "--run", "--no-hier"]), 0)
+        self.assertNotIn("hier_parts", self._boards(p)["board_a"])
+
+    def test_second_migrate_does_not_reconvert(self):
+        """已經有階層就不該再跑一次轉換（那要 Capture、要 license、要幾分鐘）。"""
+        d, p = self._v18()
+        ndd.main(["migrate", d, "--run"])
+        import ndd_hier
+        calls = []
+        real = ndd_hier.convert
+        ndd_hier.convert = lambda *a, **k: (calls.append(a) or real(*a, **k))
+        try:
+            ndd.main(["migrate", d, "--run"])
+        finally:
+            ndd_hier.convert = real
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

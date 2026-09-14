@@ -101,19 +101,38 @@ def stub_convert(mapping):
     """把 `ndd_hier.convert` 換成查表，讓 init 測試不需要 Cadence。
 
     `mapping`: {.DSN 絕對路徑: (parts_csv, nodes_csv)}。回傳還原用的 callable。
+
+    ⚠️ **stub 必須複製真實 `convert()` 的落地行為**：輸出寫進 `outdir`，
+       檔名是 `<DSN stem>_parts.csv` / `_nodes.csv`。早期的版本直接回傳
+       fixture 的原路徑，於是 `ndd.json` 指向 `hier/`、檔案卻在別的地方——
+       測試全綠，但 init 跑完根本讀不到階層。**stub 與被換掉的東西行為不同
+       時，通過的測試證明的是 stub 能跑，不是程式能跑。**
     """
+    import shutil
     import ndd_hier
-    real = ndd_hier.convert
+    real_convert, real_find = ndd_hier.convert, ndd_hier.find_cadence
 
     def fake(dsn, outdir, tclsh=None, timeout=None, echo=None):
         key = os.path.abspath(dsn)
         if key not in mapping:
             raise ndd_hier.HierError("stub 未涵蓋：%s" % dsn)
-        return mapping[key]
+        src_p, src_n = mapping[key]
+        if not os.path.isdir(outdir):
+            os.makedirs(outdir)
+        stem = os.path.splitext(os.path.basename(dsn))[0]
+        dst_p = os.path.join(outdir, "%s_parts.csv" % stem)
+        dst_n = os.path.join(outdir, "%s_nodes.csv" % stem)
+        shutil.copyfile(src_p, dst_p)
+        shutil.copyfile(src_n, dst_n)
+        return dst_p, dst_n
 
     ndd_hier.convert = fake
     ndd_hier.find_cadence = lambda hint=None: ("<stub-tclsh>", "<stub-root>")
-    return lambda: setattr(ndd_hier, "convert", real)
+
+    def restore():
+        ndd_hier.convert = real_convert
+        ndd_hier.find_cadence = real_find
+    return restore
 
 
 # ---------------------------------------------------------------- 專案骨架 --

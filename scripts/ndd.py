@@ -115,14 +115,8 @@ class Project(object):
         ck = ("hier", key)
         if ck not in self._cache:
             import ndd_hier
-            b = self.cfg["boards"].get(key) or {}
-            pc, nc = b.get("hier_parts"), b.get("hier_nodes")
-            h = None
-            if pc and nc:
-                pp, np_ = os.path.join(self.dir, pc), os.path.join(self.dir, nc)
-                if os.path.exists(pp) and os.path.exists(np_):
-                    h = ndd_hier.Hierarchy(pp, np_)
-            self._cache[ck] = h
+            paths = _hier_files(self.dir, self.cfg["boards"].get(key) or {})
+            self._cache[ck] = ndd_hier.Hierarchy(*paths) if paths else None
         return self._cache[ck]
 
     def all_boards(self, which="all"):
@@ -200,33 +194,60 @@ def _board_key(fname, used):
     return key
 
 
-def _pair_dsn(rows, d, outdir, echo=print):
+def _pair_dsn(rows, d, outdir, echo=print, strict=True):
     """把 `.DSN` 轉成階層 CSV，並用 **refdes 交集** 配到板子上——跟 BOM 配對
     同一套證據原則，不用檔名猜。
 
-    每份 `.DSN` 轉完就地對帳 `.asc`：接線不一致代表其中一邊是錯的，直接讓
-    init 停下來。階層錯掉不會讓任何東西崩潰，只會安靜地污染後續所有結論。
+    每份 `.DSN` 轉完就地對帳 `.asc`：接線不一致代表其中一邊是錯的。
+
+    -> `(out, problems)`。`problems` 是 `(板 key 或 None, 一句話)` 的清單。
+
+    ⚠️ **`strict` 的兩種語意是刻意不同的，不要統一。**
+
+    - `strict=True`（`init`）：任何問題都丟 `SystemExit`。這時候還沒有任何
+      東西存在，停下來零成本，而繼續做等於把後面每個結論都蓋在錯的地基上。
+    - `strict=False`（`migrate`）：只回報，不丟。這時候**已經有一個能用的
+      專案**，為了一份對不上的 `.DSN` 把它弄壞，比沒有階層更糟。配不上的板
+      就**不寫入階層欄位** —— 它維持原本的行為（沒有階層），而不是帶著錯的
+      階層繼續跑。「看得見的缺席」永遠優於「看不見的錯誤」。
     """
     import ndd_hier
+    problems = []
+
+    def fail(key, msg):
+        if strict:
+            raise SystemExit(msg)
+        problems.append((key, msg))
+
     dsns = _scan_dsn(d)
-    missing = [r["key"] for r in rows]
     if not dsns:
-        raise SystemExit(
-            "%s 底下沒有 .DSN。\n"
-            "  v2 需要 .DSN 才能取得階層與腳位功能名——那是 .asc 結構上給不了的。\n"
-            "  請把每塊板的 .DSN（含其子設計目錄）與 .asc、BOM 放在同一個資料夾。" % d)
-    tclsh, root = ndd_hier.find_cadence()      # 找不到就丟 HierError，不降級
+        fail(None,
+             "%s 底下沒有 .DSN。\n"
+             "  v2 需要 .DSN 才能取得階層與腳位功能名——那是 .asc 結構上給不了的。\n"
+             "  請把每塊板的 .DSN（含其子設計目錄）與 .asc、BOM 放在同一個資料夾。" % d)
+        return {}, problems
+    try:
+        tclsh, root = ndd_hier.find_cadence()   # 找不到就丟 HierError
+    except ndd_hier.HierError as exc:
+        fail(None, str(exc))
+        return {}, problems
     echo("  Cadence: %s" % root)
 
+    missing = [r["key"] for r in rows]
     by_asc = {}
     for f in dsns:
         echo("  轉換 %s ..." % f)
-        parts, nodes = ndd_hier.convert(os.path.join(d, f), outdir, tclsh=tclsh)
+        try:
+            parts, nodes = ndd_hier.convert(os.path.join(d, f), outdir, tclsh=tclsh)
+        except ndd_hier.HierError as exc:
+            fail(None, "%s 轉換失敗：%s" % (f, exc))
+            continue
         h = ndd_hier.Hierarchy(parts, nodes)
         sc = h.selfcheck()
         if not sc["ok"]:
-            raise SystemExit("%s 的階層 CSV 自我驗證失敗：\n%s"
-                             % (f, ndd_hier.format_report(f, sc, {"ok": True})))
+            fail(None, "%s 的階層 CSV 自我驗證失敗：\n%s"
+                 % (f, ndd_hier.format_report(f, sc, {"ok": True})))
+            continue
         refs = {r["base_refdes"] for r in h.real_parts()}
         best, bk = 0.0, None
         for r in rows:
@@ -236,13 +257,22 @@ def _pair_dsn(rows, d, outdir, echo=print):
             if hit > best:
                 best, bk = hit, r["key"]
         if best < 0.9:
-            raise SystemExit(
-                "%s 對不上任何一塊板（最高 refdes 命中率 %.0f%%）。\n"
-                "  請確認這份 .DSN 與資料夾裡的 .asc 是同一塊板、同一個版本。"
-                % (f, best * 100))
+            fail(None,
+                 "%s 對不上任何一塊板（最高 refdes 命中率 %.0f%%）。\n"
+                 "  請確認這份 .DSN 與資料夾裡的 .asc 是同一塊板、同一個版本。"
+                 % (f, best * 100))
+            continue
         if bk in by_asc:
-            raise SystemExit("兩份 .DSN 都配到 %s：%s 與 %s" % (bk, by_asc[bk][0], f))
+            fail(bk, "兩份 .DSN 都配到 %s：%s 與 %s" % (bk, by_asc[bk][0], f))
+            continue
         by_asc[bk] = (f, h, parts, nodes)
+
+    # ⚠️ 配到板就不算「沒有 .DSN」，即使等一下對帳沒過。兩者是不同的問題，
+    #    混在一起會讓報告同時說「對帳不一致」和「沒有對應的 .DSN」，而後者
+    #    是假的——使用者會跑去找一份其實就在資料夾裡的檔案。
+    for k in by_asc:
+        if k in missing:
+            missing.remove(k)
 
     out = {}
     for r in rows:
@@ -251,19 +281,41 @@ def _pair_dsn(rows, d, outdir, echo=print):
         f, h, parts, nodes = by_asc[r["key"]]
         cc = ndd_hier.crosscheck(h, r["nl"])
         if not cc["ok"]:
-            raise SystemExit(
-                "%s 與 %s 對帳不一致——其中一邊是錯的，先釐清再繼續：\n%s"
-                % (f, r["asc"], ndd_hier.format_report(f, {"ok": True, "parts": "-",
-                                                           "nodes": "-"}, cc)))
-        missing.remove(r["key"])
+            fail(r["key"],
+                 "%s 與 %s 對帳不一致——其中一邊是錯的，先釐清再繼續：\n%s"
+                 % (f, r["asc"], ndd_hier.format_report(
+                     f, {"ok": True, "parts": "-", "nodes": "-"}, cc)))
+            continue
         out[r["key"]] = dict(dsn=f, hier=h, cc=cc,
                              parts_csv=os.path.basename(parts),
                              nodes_csv=os.path.basename(nodes))
     if missing:
-        raise SystemExit(
-            "這些板子沒有對應的 .DSN：%s\n"
-            "  v2 要求每塊板都提供 .DSN + .asc + BOM 三份。" % ", ".join(missing))
-    return out
+        fail(None,
+             "這些板子沒有對應的 .DSN：%s\n"
+             "  v2 要求每塊板都提供 .DSN + .asc + BOM 三份。" % ", ".join(missing))
+    return out, problems
+
+
+def _hier_files(project_dir, b):
+    """該板的階層 CSV 實際路徑；設定沒填或檔案不在就回 `None`。
+
+    ⚠️ `Project.hier()` 與 `migrate` 必須用**同一個**述詞判斷「這塊板有沒有
+       階層」。兩邊各寫一份遲早會漂移，然後 migrate 認為補好了、查詢時卻讀
+       不到——而那是不會報錯的。
+    """
+    pc, nc = b.get("hier_parts"), b.get("hier_nodes")
+    if not (pc and nc):
+        return None
+    pp, np_ = os.path.join(project_dir, pc), os.path.join(project_dir, nc)
+    return (pp, np_) if (os.path.exists(pp) and os.path.exists(np_)) else None
+
+
+def _hier_cfg(info):
+    """階層在 `ndd.json` 裡的三個欄位。路徑一律正斜線——設定檔會跟著專案
+    在不同機器間移動。"""
+    return {"dsn": info["dsn"],
+            "hier_parts": "hier/" + info["parts_csv"],
+            "hier_nodes": "hier/" + info["nodes_csv"]}
 
 
 def _pair_boards(netlists, boms):
@@ -625,7 +677,7 @@ def cmd_init(args):
     # .DSN -> 階層 CSV。放在 init 最前面：對帳不過就沒有繼續的意義。
     print("\n[階層] .DSN -> 階層與腳位功能名")
     hier_dir = os.path.join(d, "hier")
-    dsn_info = _pair_dsn(rows, d, hier_dir)
+    dsn_info, _probs = _pair_dsn(rows, d, hier_dir)   # strict：有問題就丟
     for k, v in sorted(dsn_info.items()):
         cc = v["cc"]
         print("  %-20s %-34s nets %s 節點 %s 零件 %s  對帳 OK%s"
@@ -638,11 +690,8 @@ def cmd_init(args):
         boards_cfg[k] = {
             "label": os.path.splitext(r["asc"])[0], "asc": r["asc"],
             "bom": r["bom"], "bom_scope": "smt_only" if r["smt_hint"] else "complete",
-            "sheet": None, "ref_col": None, "expand_ranges": False,
-            "dsn": dsn_info[k]["dsn"],
-            # 設定檔一律用正斜線：ndd.json 會跟著專案在不同機器間移動
-            "hier_parts": "hier/" + dsn_info[k]["parts_csv"],
-            "hier_nodes": "hier/" + dsn_info[k]["nodes_csv"]}
+            "sheet": None, "ref_col": None, "expand_ranges": False}
+        boards_cfg[k].update(_hier_cfg(dsn_info[k]))
 
     loaded = {r["key"]: (r["nl"], boms[r["bom"]]) for r in rows if r["bom"] in boms}
     acc, amb, rej = ([], [], [])
@@ -1215,9 +1264,9 @@ def cmd_datasheets(args, pj):
 BOM_KIND_MAP = [(r"SMT", "smt_only")]           # 其餘一律 complete
 
 
-UPGRADE_TMPL = u"""# 升級報告（v0 -> v1）
+UPGRADE_TMPL = u"""# 升級報告
 
-> 由 `ndd.py migrate --run` 產生於 {date}。原設定備份為 `ndd.json.v0.bak`。
+> 由 `ndd.py migrate --run` 產生於 {date}。\n> 原設定備份：v0 -> v1 為 `ndd.json.v0.bak`，v1.8 -> v2.0 為 `ndd.json.pre-v2.bak`。
 
 ## 1. 設定變更
 
@@ -1234,18 +1283,27 @@ v0 把這些模型**內建自動載入**；v1 不再自動載入，所以升級�
 ⚠️ **仍需你複核**：`direction` 是依元件型別判定的，`pin_roles` 全部留空
 （那要翻 datasheet 的腳位表才能填，不憑印象代填）。
 
-## 3. 重新產生的衍生產物
+## 3. 階層與腳位功能名（v1.8 -> v2.0）
+
+v2.0 的階層（零件在哪個子電路）與腳位功能名來自 OrCAD Capture 的 `.DSN`，
+由 `migrate` **唯讀**轉出後**逐條對帳 `.asc`**。
+
+{hierarchy}
+
+⚠️ **階層是加註，不是連通。** 接線一律以 `.asc` 為準，升級前後完全相同。
+
+## 4. 重新產生的衍生產物
 
 欄位已變動（`signal_chain.csv` 新增 `caveats` / `confidence` /
 `endpoint_kind`，`loads` 欄不再含驅動端），舊的無法沿用：
 
 {regenerated}
 
-## 4. 流程執行結果
+## 5. 流程執行結果
 
 {steps}
 
-## 5. 需要你處理的
+## 6. 需要你處理的
 
 {todo}
 
@@ -1294,6 +1352,116 @@ def _restore_v0_models(pj):
         with io.open(p, "w", encoding="utf-8") as fh:
             fh.write(json.dumps(cur, indent=2, ensure_ascii=False))
     return added, skipped, sorted(set(ex) - set(want))
+
+
+def _hier_report(pj, added, problems, syms):
+    """升級報告裡「階層」那一段。
+
+    ⚠️ **報告的是現況，不是這次做了什麼。** 只列「這次補上的」會讓重跑一次
+       migrate 的人看到空白清單，以為階層不見了。每塊板現在有沒有階層才是
+       他要判斷的事；哪幾塊是這次補的只是註記。
+
+    ⚠️ **沒補上的要跟補上的一樣顯眼**，而且要帶完整對帳細節。
+    """
+    L = []
+    have = [k for k in pj.board_keys("all") if pj.hier(k)]
+    if have:
+        L.append("有階層的板（都已逐條對帳 `.asc`——對不上的不會寫入）：")
+        for k in have:
+            h = pj.hier(k)
+            L.append("- `%s` —— %d 顆零件 / %d 個 block / %d 支腳位功能名%s"
+                     % (k, len(h.real_parts()), len(h.blocks()),
+                        len(h.pin_names()),
+                        "　**這次補上的**" if k in added else ""))
+    else:
+        L.append("- （目前沒有任何板子有階層）")
+    if syms:
+        L.append("")
+        L.append("symbol 腳位功能名寫進 `verified-pins.csv` %d 筆"
+                 "（datasheet 原文列 %d 筆原封不動）。"
+                 % (syms.get("written", 0), syms.get("kept", 0)))
+        if syms.get("active_low"):
+            L.append("其中 %d 支為低有效（symbol 上有上劃線）。"
+                     % syms["active_low"])
+    if problems:
+        L.append("")
+        L.append("⚠️ **這些板沒有補上階層**，維持原本行為（查詢時階層是空的）：")
+        for k, msg in problems:
+            lines = msg.splitlines()
+            L.append("- %s%s" % ("`%s` —— " % k if k else "", lines[0]))
+            for line in lines[1:]:
+                L.append(("  `%s`" % line.strip()) if line.strip() else "")
+        L.append("")
+        L.append("沒補上不影響既有結論——接線一律以 `.asc` 為準，那沒有變。"
+                 "釐清後把 `.DSN` 放進資料夾再跑一次 `migrate --run` 即可。")
+    return "\n".join(L)
+
+
+def _migrate_hier(d, cfg, cfg_path, skip=False, echo=print):
+    """v1.8 -> v2.0：把資料夾裡的 `.DSN` 補進**既有**專案。
+
+    -> `(補上階層的板 key, problems)`
+
+    ⚠️ **保住既有專案是第一優先，這裡沒有任何一條路會把它弄壞。**
+       只 `update()` 三個新欄位，不刪不覆寫任何手寫設定（assertions、
+       net_normalize、mates、mate_map、endpoints、part_package 原封不動）。
+
+    ⚠️ **配不上的板就不寫入階層欄位。** 和 `init` 的硬失敗不同，而且是刻意
+       的：`init` 時什麼都還沒有，停下來零成本；`migrate` 時已經有一個能用
+       的專案，為了一份對不上的 `.DSN` 把它弄壞比沒有階層更糟。沒寫入的板
+       維持原本行為（查詢時看得到階層是空的），而不是帶著錯的階層繼續跑。
+       **看得見的缺席永遠優於看不見的錯誤。**
+    """
+    boards = cfg.get("boards") or {}
+    need = [k for k in sorted(boards) if not _hier_files(d, boards[k])]
+    if skip or not need:
+        return [], []
+    if not _scan_dsn(d):
+        return [], [(None,
+                     "資料夾裡沒有 .DSN，這 %d 塊板維持沒有階層：%s"
+                     % (len(need), ", ".join(need[:6])))]
+
+    rows, problems = [], []
+    for k in need:
+        try:
+            rows.append(dict(key=k, asc=boards[k]["asc"],
+                             nl=Netlist(os.path.join(d, boards[k]["asc"]))))
+        except Exception as exc:
+            problems.append((k, "讀不到 %s 的 .asc（%s），跳過階層"
+                             % (k, exc)))
+    if not rows:
+        return [], problems
+
+    echo("")
+    echo("[階層] .DSN -> 階層與腳位功能名（v1.8 -> v2.0）")
+    info, probs = _pair_dsn(rows, d, os.path.join(d, "hier"),
+                            echo=echo, strict=False)
+    problems.extend(probs)
+
+    added = []
+    for k, v in sorted(info.items()):
+        boards[k].update(_hier_cfg(v))
+        added.append(k)
+        cc = v["cc"]
+        echo("  %-20s nets %s 節點 %s 零件 %s  對帳 OK%s"
+             % (k, cc["nets"], cc["nodes"], cc["parts"],
+                "（PADS 改名 %d 條）" % len(cc["renamed"])
+                if cc.get("renamed") else ""))
+    if added:
+        # 原設定另存一份。`.v0.bak` 是 v0->v1 那次的，不可覆蓋掉。
+        bak = cfg_path + ".pre-v2.bak"
+        if not os.path.exists(bak):
+            shutil.copy2(cfg_path, bak)
+            echo("  原設定備份為 %s" % os.path.basename(bak))
+        with io.open(cfg_path, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(cfg, indent=2, ensure_ascii=False))
+        echo("  已補上 %d 塊板的階層設定" % len(added))
+    for _k, msg in problems:
+        # 整段印出來。只印第一行的話，對帳不一致的細節（哪條 net、哪顆零件）
+        # 就消失了——而那正是使用者唯一能拿來釐清的東西。
+        for i, line in enumerate(msg.splitlines()):
+            echo(("  !! " if i == 0 else "     ") + line)
+    return added, problems
 
 
 def cmd_migrate(args):
@@ -1383,19 +1551,27 @@ def cmd_migrate(args):
             "     但**不會被當成已解析的快取使用** —— 舊列若被當成有效，等於把\n"
             "     未鎖定封裝的資料洗成合法覆蓋。需要哪支腳就重跑 pinfn。" % mig)
 
-    no_hier = [k for k, b in (cfg.get("boards") or {}).items()
-               if not b.get("hier_parts")]
+    no_hier = [k for k in sorted(cfg.get("boards") or {})
+               if not _hier_files(d, (cfg["boards"][k]))]
     if no_hier:
-        # ⚠️ migrate **不會**自己去轉 .DSN——舊專案的資料夾裡通常根本沒有
-        #    .DSN。這裡只把「你這個專案沒有階層」講清楚，不要讓人以為
-        #    升級完就有了。
-        todo.append(
-            "這 %d 塊板沒有階層資料：%s\n"
-            "     v2.0 的階層與腳位功能名來自 `.DSN`，**migrate 不會自動補**。\n"
-            "     沒有階層一切照舊可用，只是 `pins` 不顯示子電路位置與功能名、\n"
-            "     pinmap 的 hier_path / pin_name 欄會是空的。\n"
-            "     要補：把各板 `.DSN` 放進資料夾，在**新的空資料夾**重跑 init。"
-            % (len(no_hier), ", ".join(no_hier[:6])))
+        found = _scan_dsn(d)
+        head = ("這 %d 塊板還沒有階層資料：%s\n"
+                "     v2.0 的階層與腳位功能名來自 `.DSN`——那是 `.asc` 結構上"
+                "給不了的。\n"
+                "     沒有階層一切照舊可用，只是 `pins` 不顯示子電路位置與功能名、"
+                "pinmap 的\n"
+                "     hier_path / pin_name 欄是空的。"
+                % (len(no_hier), ", ".join(no_hier[:6])))
+        if found:
+            todo.append(head + "\n"
+                        "     資料夾裡已經有 %d 份 `.DSN`，跑 `migrate --run` "
+                        "就會轉換、對帳並補上。" % len(found))
+        else:
+            todo.append(head + "\n"
+                        "     要補：把各板的 `.DSN`（含其子設計目錄）放進**這個"
+                        "資料夾**，再跑 `migrate --run`。\n"
+                        "     不必重建專案——手寫的斷言、命名規則、對接關係都會"
+                        "留著。")
 
     todo.append(
         "衍生產物請刪掉重跑：`export/`、`REVIEW.md`。欄位已變動\n"
@@ -1421,6 +1597,9 @@ def cmd_migrate(args):
             % (len(legacy_pairs), ", ".join(legacy_pairs[:6])))
 
     import datetime
+    # v1.8 -> v2.0：先補階層，Project 才吃得到新的設定。
+    hier_added, hier_problems = _migrate_hier(d, cfg, cfg_path,
+                                              skip=args.no_hier)
     pj = Project(cfg_path)
     added, skipped, unused = ([], [], [])
     if not args.no_models:
@@ -1449,6 +1628,10 @@ def cmd_migrate(args):
 
     results = []
     A = _cmd_args
+    syms = None
+    if any(pj.hier(k) for k in pj.board_keys("all")):
+        syms = _run_step("pinfn —— symbol 腳位功能名入庫",
+                         lambda: _import_symbols(pj), results)
     _run_step("export —— 逐腳事實表", lambda: cmd_export(A(), pj), results)
     _run_step("datasheets —— %s" % ("盤點與下載" if args.datasheets else "只盤點不下載"),
               lambda: cmd_datasheets(A(no_download=not args.datasheets), pj), results)
@@ -1478,12 +1661,21 @@ def cmd_migrate(args):
     run_todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載"
                     "填進 `ndd.json` 的 `endpoints`（不需要 datasheet）")
     run_todo.append("- [ ] **舊的 pinfn 快取** —— 標為待重新確認，需要哪支腳就重跑")
+    for _k, msg in hier_problems:
+        run_todo.append("- [ ] **階層未補上** —— %s" % msg.splitlines()[0])
+    if syms and syms.get("conflict_lines"):
+        head = ("- [ ] **%d 組同料號的 symbol 腳位名不一致** —— 這幾筆沒有寫進 "
+                "`verified-pins.csv`；在釐清之前這幾支腳一律以 datasheet 為準："
+                ) % len(syms["conflict_lines"])
+        run_todo.append("\n".join(
+            [head] + ["        - " + x for x in syms["conflict_lines"][:10]]))
 
     txt = UPGRADE_TMPL.format(
         date=datetime.date.today().isoformat(),
         changes="\n".join("- %s" % c for c in changed) or "- （設定已是 v1 格式）",
         models=("\n".join("- `%s`" % k for k in added) or "- （沒有用得到的，或你選了 --no-models）")
                + ("\n\n未加入（這個專案沒用到）：%s" % "、".join(unused) if unused else ""),
+        hierarchy=_hier_report(pj, hier_added, hier_problems, syms),
         regenerated="\n".join("- %s" % r for r in regen) or "- （無）",
         steps="\n".join("- %-28s %s%s" % (n, st, "　—— " + why[:60] if why else "")
                          for n, st, why in results),
@@ -2035,6 +2227,8 @@ def main(argv=None):
     p.add_argument("--run", action="store_true", help="升級設定後一路跑完所有流程")
     p.add_argument("--no-models", action="store_true", help="不還原 v0 的內建模型")
     p.add_argument("--datasheets", action="store_true", help="順便嘗試下載 datasheet")
+    p.add_argument("--no-hier", action="store_true", dest="no_hier",
+                   help="不要轉換 .DSN（這台機器沒有 Capture，或只想重跑流程）")
     p.set_defaults(func=cmd_migrate, noproj=True)
 
     args = ap.parse_args(argv)

@@ -63,8 +63,18 @@ python -m unittest discover -s tests
 **然後升級每個既有的分析資料夾：**
 
 ```bash
+# v2.0 起：先把各板的 .DSN 放進原本那個分析資料夾，再跑
 python scripts/ndd.py migrate "C:/path/to/analysis" --run
 ```
+
+`migrate` 會轉換 `.DSN`、逐條對帳 `.asc`、把階層補進既有的 `ndd.json`
+（原檔另存 `ndd.json.pre-v2.bak`），**手寫的斷言、命名規則、對接關係全部
+保留**。沒放 `.DSN` 也能跑，專案維持沒有階層的狀態；`--no-hier` 可明確跳過
+（這台機器沒裝 Capture 時用）。
+
+⚠️ 某塊板的 `.DSN` 與 `.asc` 對不上時，**那塊板不寫入階層**，其餘照常升級完
+——`init` 在同樣情況是整個中止。差別是刻意的：`init` 時還沒有東西存在，停下來
+零成本；`migrate` 時已經有一個能用的專案，弄壞它比沒有階層更糟。
 
 ⚠️ **既有專案不要重跑 `init`。** `init` 會覆蓋 `ndd.json`，手寫的斷言、命名
 規則、對接關係都會消失（實測一個真實專案：63 條斷言、12 條正規化規則、
