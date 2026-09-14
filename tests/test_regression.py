@@ -692,7 +692,11 @@ class TestNetClass(unittest.TestCase):
 
     def test_ground_aliases(self):
         for n in ("GND", "AGND", "DGND", "PGND", "PGND_R", "GND_A", "GND_B",
-                  "GND_EARTH", "28V_GND_PM_2", "GND1"):
+                  "GND_EARTH", "28V_GND_PM_2", "GND1",
+                  # v1.8.1：尾綴裝飾。T_RADAR_T1 的 48 V 電源入口就是這樣寫的，
+                  # 對面那塊板寫 `GLOBAL_GND`，6 腳裡 3 腳被誤計成矛盾。
+                  "GLOBAL_GNDL", "GLOBAL_GNDR", "GNDA", "PGND_R2",
+                  "GND_EARTH2", "GND_RJ45", "LED_R_GND"):
             self.assertEqual(Fabric.cls(n), "GND", n)
 
     def test_rail_naming_conventions(self):
@@ -713,12 +717,65 @@ class TestNetClass(unittest.TestCase):
                   "FPGA_FLAG_P", "SERDESA_RTN"):
             self.assertEqual(Fabric.cls(n), "SIG", n)
 
+    def test_negative_rails(self):
+        """負電壓軌 —— `\d+V` 吃不到開頭的減號，`FE_-5V_VIN` 會掉成 SIG，
+        `FE_VDD_-5V` 則靠 VDD 兜底落到無電壓標的 `PWR`，跨板對不起來。"""
+        for n, want in (("FE_VDD_-5V", "PWR:-5V"), ("FE_-5V_VIN", "PWR:-5V"),
+                        ("SNS_VDD_-5V_P", "PWR:-5V"), ("-5V_A", "PWR:-5V")):
+            self.assertEqual(Fabric.cls(n), want, n)
+        # 控制訊號仍然優先 —— 名字帶 -5V 不代表它是 -5 V 軌。
+        for n in ("FE_-5V_EN", "-5V_PG", "-5V_PG_B"):
+            self.assertEqual(Fabric.cls(n), "SIG", n)
+
     def test_bare_vdd_without_voltage(self):
         for n in ("A_VDD25", "XO_100MHZ_VDD_DPU", "TCXO_100MHZ_VDD"):
             self.assertEqual(Fabric.cls(n), "PWR", n)
 
     def test_none_stays_none(self):
         self.assertIsNone(Fabric.cls(None))
+
+
+class TestMateContradiction(unittest.TestCase):
+    """`Fabric.contradicts` —— 「不認得名字」不等於「兩塊板對不上」。
+
+    v1.8 的 `rank_mating` 直接比 `cls(a) != cls(b)`，而 `cls` 的 `SIG` 是
+    catch-all：真訊號與**任何沒見過的電源／地寫法**都落在那裡。於是每遇到
+    一種新的命名慣例就會憑空生出矛盾，而 `_rank_decides` 只要一支矛盾腳就
+    擋掉 `inferred`。逐板補正規式追不完，所以改成：雙方都要被正面辨識成
+    電源／地，才算矛盾。
+    """
+
+    def test_real_contradictions_still_count(self):
+        for a, b in (("GND", "PWR:5V"), ("PWR:3V3", "PWR:5V"),
+                     ("PWR:48V", "GND"), ("PWR:1V8", "PWR:1V2")):
+            self.assertTrue(Fabric.contradicts(a, b), (a, b))
+            self.assertTrue(Fabric.contradicts(b, a), (b, a))
+
+    def test_unrecognized_is_not_counter_evidence(self):
+        """本版的核心主張。`SIG` 可能只是「我沒見過這種寫法」。"""
+        for a, b in (("GND", "SIG"), ("PWR:5V", "SIG"), ("SIG", "SIG"),
+                     ("PWR", "SIG")):
+            self.assertFalse(Fabric.contradicts(a, b), (a, b))
+            self.assertFalse(Fabric.contradicts(b, a), (b, a))
+
+    def test_untagged_pwr_is_weak_evidence(self):
+        """無電壓標的 `PWR` 只是「名字帶 VDD/VCC」，不足以推翻帶標的那側。"""
+        self.assertFalse(Fabric.contradicts("PWR", "PWR:5V"))
+        self.assertFalse(Fabric.contradicts("PWR:5V", "PWR"))
+
+    def test_unconnected_pin_is_not_a_contradiction(self):
+        for a in ("GND", "PWR:5V", "SIG", None):
+            self.assertFalse(Fabric.contradicts(None, a), a)
+            self.assertFalse(Fabric.contradicts(a, None), a)
+
+    def test_split_ground_spelling_no_longer_contradicts(self):
+        """端到端：兩塊板對同一支連接器腳，一邊 `GLOBAL_GNDR`、一邊
+        `GLOBAL_GND`。⚠️ 這裡刻意用 v1.8 的舊 `cls` 結果（`SIG` vs `GND`）
+        當輸入 —— 證明規則本身就擋得住，不依賴正規式有沒有放寬。
+        """
+        self.assertFalse(Fabric.contradicts("SIG", "GND"))
+        # 放寬之後兩邊都認得，而且認成同一類
+        self.assertEqual(Fabric.cls("GLOBAL_GNDR"), Fabric.cls("GLOBAL_GND"))
 
 
 if __name__ == "__main__":

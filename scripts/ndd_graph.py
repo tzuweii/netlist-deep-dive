@@ -226,20 +226,27 @@ class Fabric(object):
     # 地線與電源軌的命名慣例 —— 這是 **EDA 通用慣例**，不是某個專案的私有規則，
     # 所以寫死在這裡而不是丟給設定檔。⚠️ 只認「整個 token」，不做子字串比對：
     # `TX_PGA_LOAD` 不可以因為含有 `PG` 就被當成 power-good。
-    _RX_GND = re.compile(r"(^|_)[A-Z]?GND\d*(_|$)")
+    _RX_GND = re.compile(r"(^|_)[A-Z]*GND[A-Z0-9]*(_|$)")
     _RX_CTRL = re.compile(r"(^|_)(EN|PG|PGOOD|PWRGD|POK)(_|$)")
-    _RX_RAIL = re.compile(r"(^|_)(\d+P\d+V|\d+V\d+|\d+V)(_|$)")
+    _RX_RAIL = re.compile(r"(^|_)(-?\d+P\d+V|-?\d+V\d+|-?\d+V)(_|$)")
 
     @staticmethod
     def cls(n):
         """腳位類別 —— 跨板唯一可靠的不變量。
 
-        認得的地線寫法：`GND` / `AGND` / `DGND` / `PGND` / `GND_A` /
-        `GND_EARTH` / `28V_GND_PM_2`。認得的電源軌寫法：帶 `VDD`/`VCC` 的，
-        以及 `3P3V_P` / `1P8V` / `28V_A` / `6V_C` / `MRAM_3V3_DPU` 這類
-        「數字 + V」慣例。
+        認得的地線寫法：token 的核心是 `GND`，前後都可以有裝飾 ——
+        `GND` / `AGND` / `PGND` / `GND_A` / `GNDL` / `GND_EARTH2` /
+        `28V_GND_PM_2`。認得的電源軌寫法：帶 `VDD`/`VCC` 的，以及
+        `3P3V_P` / `1P8V` / `28V_A` / `-5V_A` / `MRAM_3V3_DPU` 這類
+        「（負號）數字 + V」慣例。
 
-        ⚠️ 控制訊號優先於電源軌：`28V_EN_PM_2` 是 enable，不是 28 V 軌。
+        ⚠️ 控制訊號優先於電源軌：`28V_EN_PM_2` 是 enable，不是 28 V 軌；
+           `FE_-5V_EN` 是 enable，不是 -5 V 軌。
+
+        ⚠️ **回傳 `SIG` 的意思是「不認得」，不是「確定是訊號」。**
+           它是 catch-all：真的訊號、以及任何沒見過的電源／地寫法，
+           都落在這裡。任何拿 `SIG` 當**反證**的地方都是 bug ——
+           要判斷兩支腳矛不矛盾請用 `contradicts()`，不要直接比 `cls()`。
         """
         if n is None:
             return None
@@ -255,6 +262,40 @@ class Fabric(object):
         if "VDD" in u or "VCC" in u:
             return "PWR"
         return "SIG"
+
+    @staticmethod
+    def is_rail(c):
+        """這個類別是不是「正面辨識出來的電源／地」。
+
+        `SIG` 不算 —— 它是 `cls` 的 catch-all，代表「不認得」而不是
+        「確定是訊號」。
+        """
+        return c == "GND" or (c or "").startswith("PWR")
+
+    @staticmethod
+    def contradicts(ca, cb):
+        """兩支腳的類別算不算矛盾。
+
+        ⚠️ 判準是**雙方都要有正面證據**。認不得的名字會落到 `SIG`，把它
+           當反證等於宣稱「我沒見過這種寫法 == 這兩塊板對不上」—— v1.8
+           修過一次（`AGND` 被判成 SIG，害 5 組對接卡在 ambiguous），但
+           逐板補正規式追不完：實測 T_RADAR 兩塊板，`GLOBAL_GNDL/R` 的
+           尾綴字母又漏一次，48 V 電源入口 6 腳裡 3 腳被誤計成矛盾。
+
+           所以這裡改成：**不認得就不計分**，把判定責任交還給
+           `MATE_MIN_SEMANTIC` 那條正面證據下限。最壞結果是證據不足、
+           停在 `ambiguous` 要人確認 —— 而不是憑空生出矛盾，看起來像
+           佈局真的對不上。
+        """
+        if not (Fabric.is_rail(ca) and Fabric.is_rail(cb)):
+            return False
+        if ca == cb:
+            return False
+        # 無電壓標的 `PWR`（只靠名字帶 VDD/VCC 認出來的）是弱證據，
+        # 不足以推翻帶電壓標的那一側。
+        if ca.startswith("PWR") and cb.startswith("PWR") and "PWR" in (ca, cb):
+            return False
+        return True
 
     def _pn(self, board, refdes):
         b = self.bom.get(board)
@@ -310,8 +351,8 @@ class Fabric(object):
                     q = fn(p)
                 except Exception:
                     continue
-                ca, cb = self.cls(pa.get(p)), self.cls(pb.get(q))
-                if ca is not None and cb is not None and ca != cb:
+                if Fabric.contradicts(self.cls(pa.get(p)),
+                                      self.cls(pb.get(q))):
                     bad += 1
                 if self.norm(pa.get(p)) == self.norm(pb.get(q)):
                     match += 1

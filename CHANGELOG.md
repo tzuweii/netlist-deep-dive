@@ -59,6 +59,93 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v1.8.1 — 「不認得這個名字」不等於「兩塊板對不上」
+
+v1.8.0 補了一輪正規式，讓 `Fabric.cls` 認得 `AGND` / `GND_A` / `28V_A` 這些寫法。
+拿兩塊新板（`T_RADAR_T1` 1531 parts / 1068 nets、`T_RADAR_T2` 1955 parts /
+1402 nets）對照，**同一個失效模式又出現了一次**：
+
+```
+T1 J2 (Conn-Header_0430450601)  1,2,3=GLOBAL_VCCR_48V  4,5,6=GLOBAL_GNDR
+T2 J7 (Conn-Header_0449140601)  1,2,3=GLOBAL_VCC_48V   4,5,6=GLOBAL_GND
+→ 6 腳裡 3 腳被算成矛盾（SIG vs GND）
+```
+
+`_RX_GND = (^|_)[A-Z]?GND\d*(_|$)` 只允許**前綴**一個字母，接不住尾綴的 L/R。
+而 `_rank_decides()` 一支矛盾腳就擋掉 `inferred`，所以這組 48 V 電源入口必然
+停在 `mate:ambiguous`。
+
+### 這次不再補正規式
+
+每塊板都很大、命名慣例各自為政，**逐板列舉是輸的賽局**——補完 `AGND` 會遇到
+`GNDL`，補完 `GNDL` 會遇到下一種。所以這版改的是根因：
+
+> `cls` 把「這確定是訊號」和「我不認得這個名字」都回傳 `SIG`，
+> 而 `rank_mating` 把後者當成**正面的矛盾證據**。
+
+這正是這個 skill 從 v1.0.0 就在修的那件事——「讓工具在查不到時說出查不到」。
+
+**新增 `Fabric.contradicts(ca, cb)`：雙方都要被正面辨識成電源／地，才算矛盾。**
+
+| A 側 | B 側 | 算矛盾？ |
+|---|---|---|
+| `GND` | `PWR:5V` | ✅ 是 |
+| `PWR:3V3` | `PWR:5V` | ✅ 是 |
+| `GND` | `SIG` | ❌ **否**——可能只是沒見過這種寫法 |
+| `PWR:48V` | `SIG` | ❌ 否 |
+| `PWR`（無電壓標） | `PWR:5V` | ❌ 否——弱證據不足以推翻帶標的 |
+
+判定責任交還給既有的 `MATE_MIN_SEMANTIC`（至少 4 支腳 net 名兩側相符）那條
+**正面證據下限**，而不是靠數矛盾。下次再遇到沒見過的地線寫法，最壞結果是
+「證據不足、停在 `ambiguous` 要人確認」，而不是憑空生出矛盾。
+
+呼叫點：`ndd_graph.rank_mating`、`ndd.py` 的 `_name_diffs`。
+**`ndd_package.score_topology` 刻意不動**——那裡的 `pin_roles` 來自 datasheet，
+單側就已經是正面證據，「宣告 VSS 卻落在具名訊號上」是真反證；`rank_mating`
+是在一堆未知名字上做排列搜尋，性質不同。
+
+### 順手放寬 token 形狀（次要）
+
+```python
+_RX_GND  = r"(^|_)[A-Z]*GND[A-Z0-9]*(_|$)"             # 前後綴都允許裝飾
+_RX_RAIL = r"(^|_)(-?\d+P\d+V|-?\d+V\d+|-?\d+V)(_|$)"  # 允許負軌
+```
+
+`_RX_CTRL` 不動。T1+T2 共 2470 條 net 中**只有 8 條改變分類，全部是修正**：
+
+| net | v1.8.0 | v1.8.1 |
+|---|---|---|
+| `GLOBAL_GNDL` / `GLOBAL_GNDR` | `SIG` | `GND` |
+| `FE_VDD_-5V` / `_P` / `_N`、`SNS_VDD_-5V_P` / `_N` | `PWR`（無標） | `PWR:-5V` |
+| `FE_-5V_VIN` | `SIG` | `PWR:-5V` |
+
+沒有新誤判：`FE_-5V_EN`、`-5V_PG`、`LED_PWR_EN`、`FE_PWR_I2C_SDA`、
+`TX_PGA_LOAD`、`SERDESA_RTN` 仍是 `SIG`。
+
+### 排名實測（T_RADAR T1/T2）
+
+| 對接 | v1.8.0 | v1.8.1 | 判讀 |
+|---|---|---|---|
+| T1.J2 / J8 ↔ T2.J7（6 腳 48 V 入口） | 矛盾 3 | **矛盾 0** | 仍 `ambiguous`（語意 0 < 4、margin 0）——3+3 腳完全對稱，工具說不知道是**對的** |
+| T1.J4 ↔ T1.J5（200 腳對照組） | margin 1 | 冠軍不變，**margin 18** | 判定改由正面證據主導，反而更果斷 |
+| T2.J63 ↔ J64（80 腳，非對接） | 矛盾 32 | 矛盾 32 | 真的 GND↔PWR 矛盾**照樣否決** |
+| T2.J1 ↔ J61（80 腳，非對接） | 矛盾 47 | 矛盾 12 | 仍非 0，仍被否決 |
+
+真矛盾留著，雜訊拿掉，沒有任何一組被錯誤地升級成 `inferred`。
+
+### 回歸狀態
+
+`python -m unittest discover -s tests` **100 項全過**（新增 `TestMateContradiction`
+與 `test_negative_rails`）。
+
+⚠️ **v1.8.0 的 4 板基準（3761 parts、63 條斷言）尚未重跑**——那個專案不在本
+repo 內。升級後請自行對它確認：`pinmap_*.csv` 與 `signal_chain.csv` 仍
+byte-identical、原本 11 組定案的對接排名未變、`audit` 仍 PASS，且
+`3P4V_C` vs `3P3V_C_VDD_X` 那組**必須仍是 `ambiguous`**（電壓標示本身就對不
+起來，那是正確行為，不可以被這次放寬掃掉）。
+
+---
+
 ## v1.8.0 — `Fabric.cls` 認得業界通用的地線／電源軌命名
 
 `cls` 是**跨板唯一可靠的不變量**，`mate` 的矛盾計分與 `pin_roles` 的封裝判定

@@ -253,8 +253,8 @@ def _name_gap(fab, ba, ra, bb, rb, limit=5):
         na, nb = pa.get(p), pb.get(p)
         if not na or not nb or fab.norm(na) == fab.norm(nb):
             continue
-        if fab.cls(na) != fab.cls(nb):
-            continue                      # 類別就不同的是矛盾，不是命名差異
+        if fab.contradicts(fab.cls(na), fab.cls(nb)):
+            continue                      # 類別真的相斥的是矛盾，不是命名差異
         out.append("%s / %s" % (na, nb))
         if len(out) >= limit:
             break
