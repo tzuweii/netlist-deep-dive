@@ -59,6 +59,141 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v2.0.0 — 階層與腳位功能名：輸入從兩份變三份
+
+**這是 breaking change。** 舊的用法（資料夾裡只有 `.asc` + BOM）在 v2.0.0 會
+直接失敗，不是降級執行——見文末「升級」。
+
+### 為什麼
+
+`.asc` 一直有兩件事結構上給不了：
+
+- **階層** —— 零件在哪個子電路裡。3761 顆零件的板子，`U2071` 這個編號本身
+  不帶任何位置資訊。
+- **腳位功能名** —— `U2071` 的第 4 腳叫 `LDAC`，而且 symbol 上畫了上劃線
+  （低有效）。`.asc` 只有腳號。
+
+兩者都在 OrCAD Capture 的 `.DSN` 裡。
+
+### 走過的彎路（`pitfalls.md` #23 記下了判準）
+
+先試的是 Allegro 第三方 netlist（`pstxprt.dat` / `pstxnet.dat`）反剖析。
+**兩片板就出現 7 處方言分歧**——`CAPTURE_WRITER` 與 `CAPTURE_WRITER_5X` 的
+跳脫規則與命名寫法不同，程式愈補愈像特例集合。
+
+> 症狀是「每匯入一片板就多一個 bug」。那不是程式沒寫好，**那是格式選錯了**。
+
+判準在於格式的本質：`.asc` 是 **formatter 輸出**（固定詞彙、扁平、名稱放在
+固定欄位），所以每片板都對；`pstx*.dat` 是**資料庫傾印**，層級與跳脫被塞進
+字串，writer 改版就換一種寫法。
+
+改走 Capture 自己的 TCL API（`orDb_Dll_Tcl64.dll`）：名字是**值**不是要拆的
+字串，沒有序列化就沒有方言。**六片板零差異，腳本一行沒改。**
+
+### 新增
+
+| | |
+|---|---|
+| `scripts/ndd_hier.py` | 找 Cadence、跑轉換、解析兩份 CSV、自我驗證、與 `.asc` 對帳 |
+| `scripts/ndd_export.tcl` | **唯讀** TCL 匯出器，隨 skill 發佈 |
+| `Project.hier(key)` | 階層存取；沒有階層資料回 `None`，呼叫端一律要能照常運作 |
+| `pinfn --import-symbols` | 把 symbol 腳位名整批寫進 `verified-pins.csv` |
+
+⚠️ **絕不寫入 Cadence 安裝目錄。** TCL 腳本放在 skill 自己的 `scripts/`，
+以絕對路徑餵給 `tclsh`；輸出一律落在分析資料夾。
+
+### 階層用**關聯式**編碼，不是分隔符
+
+匯出檔的 `id` / `parent_id` / `depth` 三欄才是結構，路徑一律靠 `parent_id`
+上溯。帶分隔符的 `hier_path_display` **只給人看**。
+
+理由是實測的：14,355 個名稱裡，block 名／refdes／pin 名合法地出現過
+`-`、`\`、`/`、空白、`+`、`()`、`#`——**沒有任何分隔符是安全的**。挑哪一個
+都會在某片板上拆錯，而且拆錯不會報錯，只會給你一棵假的階層樹
+（`pitfalls.md` #19）。
+
+`depth` 是第二個獨立來源：`selfcheck()` 自己走一次 parent 鏈去對照。
+
+### 對帳 `.asc` 是**硬失敗**，不是警告
+
+`init` 把 `.DSN` 轉出來之後，逐條比 net／節點／零件。不一致就停，不產出任何
+東西。
+
+階層寫錯不會讓任何東西崩潰——它只會給出**可信但錯誤**的答案。開發期間三個
+bug 全部只被這道對帳抓到，沒有任何一個有其他症狀（`pitfalls.md` #24）：
+
+- `GetIsGlobal` 少傳 status 參數 → `is_global` 恆為 0
+- `IsNetlistIgnore` 的語意不是「排除於 netlist 之外」→ 零件數對不上
+- 一度想用「沒有 pin」當排除規則 → 會**誤刪 47 顆真零件**（fiducial、鎖孔）
+
+PADS 改名是唯一容許的差異：`.asc` 不收 `*`、`/`，formatter 會把整條 net 改名
+成 `X#####`（實測 T_RADAR_T2 七條）。**節點集合完全相同**才算改名，工具列出
+對照表；節點也不同就照樣 FAIL（`pitfalls.md` #21）。
+
+### 新來源標記 `[S]`：名字是 `[S]`，行為是 `[D]`
+
+symbol 的腳位名照 datasheet 建，**名字**可信。但 symbol 沒有原文也沒有頁碼，
+它證明不了這支腳做什麼。
+
+| 主張 | 標記 |
+|---|---|
+| 「U2071 的第 4 腳叫 `LDAC`」 | `[S]` |
+| 「`LDAC` 是低有效」（symbol 上有上劃線） | `[S]` |
+| 「U2071 在 `UC1 / Main_P` 裡」 | `[S]` |
+| 「拉低 `LDAC` 會更新 DAC 輸出」 | `[D 檔名 p.x]` |
+
+`EN` 這個名字不構成「拉高致能」的證據（`pitfalls.md` #22）。
+
+### symbol 與 datasheet 互相佐證，不互相取代
+
+symbol 列在快取裡標 `capture_symbol`，**不會**讓 datasheet 抽取被跳過。
+`pinfn` 抽到同一支腳時自動對名：對得上就記進 `corroborated_by`，對不上就當場
+攤開兩邊的名字（最常見成因是封裝選錯）。
+
+同一料號的兩顆零件 symbol 腳位名不一致時**整筆不寫入**，列進 `SETUP.md`。
+六片板實測命中一組真實案例：`SN74CBTLV3126DGVR` 的 pin 1/4/10/13 在一塊板上
+叫 `SEL1..4`、在另一塊板上叫 `OE1..4`。
+
+⚠️ 名字正規化時 `+` 與 `-` **必須保留**——`SENSE3+` 與 `SENSE3-` 是差動對的
+兩支不同腳。
+
+### 其他
+
+- `export` 的 pinmap 多三欄：`hier_path` / `pin_name` / `active_low`
+- `trace` 的 `signal_chain.csv` 多三欄：`far_pin_name` / `far_block` /
+  `load_blocks`。**階層只加註，不影響 BFS**——連通一律只由 `.asc` 決定，
+  有測試釘住這件事
+- `pins` / `net` 的輸出帶功能名；低有效以 `~` 前綴標示
+- 輸出被導向檔案時強制 UTF-8。先前在繁中 Windows 上 `init --plan > out.txt`
+  會因為 `↔` 不在 cp950 裡直接中斷
+
+### 六片板實測
+
+```
+b0017_dpu_v1  nets (2502, 2502) 節點 (14813, 14813) 零件 (3761, 3761)  對帳 OK
+fecu_fm       nets (1128, 1128) 節點 (5441, 5441)   零件 (1446, 1446)  對帳 OK
+interposer    nets  (748,  748) 節點 (4159, 4159)   零件 (1322, 1322)  對帳 OK
+t_radar_t1    nets (1068, 1068) 節點 (5469, 5469)   零件 (1532, 1532)  對帳 OK
+t_radar_t2    nets (1402, 1402) 節點 (7069, 7069)   零件 (1955, 1955)  對帳 OK（PADS 改名 7 條）
+t_spacehub_fe nets  (316,  316) 節點 (1602, 1602)   零件  (245,  245)  對帳 OK
+```
+
+symbol 腳位名 4875 筆，其中 72 支低有效。
+
+### 升級
+
+**這台機器要裝 OrCAD Capture**（`init` 自動偵測 `C:\Cadence\SPB_*`，取版本
+最高的一套）。沒有 Capture 就無法處理 `.DSN`，`init` 會**失敗而不是降級**。
+
+新專案：把每塊板的 `.DSN` + `.asc` + BOM 放進同一個資料夾，照常
+`init <資料夾> --run`。`.DSN` 不能同時開在 Capture 裡（旁邊會有 `.DSNlck`，
+工具會擋下來——開著的檔案去讀會**無限等待**，不是報錯）。
+
+⚠️ **既有的 v1.8 專案 `migrate` 尚未支援 `.DSN`**，維持原行為。升級路徑另行
+處理。
+
+---
+
 ## v1.8.1 — 「不認得這個名字」不等於「兩塊板對不上」
 
 v1.8.0 補了一輪正規式，讓 `Fabric.cls` 認得 `AGND` / `GND_A` / `28V_A` 這些寫法。

@@ -105,6 +105,26 @@ class Project(object):
             self._cache[key] = (nl, bom)
         return self._cache[key]
 
+    def hier(self, key):
+        """該板的階層（v2 由 `.DSN` 轉出）。**沒有就回 None。**
+
+        階層是**加註**——它告訴你某顆零件在哪個子電路、某支腳叫什麼功能名。
+        連通與接線一律以 `.asc` 為準（init 已逐條對帳過），任何呼叫端都不得
+        把階層當成連線的來源，也必須能在 `None` 時照常運作。
+        """
+        ck = ("hier", key)
+        if ck not in self._cache:
+            import ndd_hier
+            b = self.cfg["boards"].get(key) or {}
+            pc, nc = b.get("hier_parts"), b.get("hier_nodes")
+            h = None
+            if pc and nc:
+                pp, np_ = os.path.join(self.dir, pc), os.path.join(self.dir, nc)
+                if os.path.exists(pp) and os.path.exists(np_):
+                    h = ndd_hier.Hierarchy(pp, np_)
+            self._cache[ck] = h
+        return self._cache[ck]
+
     def all_boards(self, which="all"):
         return {k: self.load(k) for k in self.board_keys(which)}
 
@@ -145,6 +165,14 @@ def _scan(d):
                   if f.lower().endswith((".xlsx", ".xlsm")) and not f.startswith("~$"))
     if not ascs:
         raise SystemExit("%s 底下沒有 .asc" % d)
+    return _scan_tail(d, ascs, xlsx)
+
+
+def _scan_dsn(d):
+    return sorted(f for f in os.listdir(d) if f.lower().endswith(".dsn"))
+
+
+def _scan_tail(d, ascs, xlsx):
     netlists = [(f, Netlist(os.path.join(d, f))) for f in ascs]
     boms, skipped = {}, []
     for x in xlsx:
@@ -170,6 +198,72 @@ def _board_key(fname, used):
         n += 1
     used.add(key)
     return key
+
+
+def _pair_dsn(rows, d, outdir, echo=print):
+    """把 `.DSN` 轉成階層 CSV，並用 **refdes 交集** 配到板子上——跟 BOM 配對
+    同一套證據原則，不用檔名猜。
+
+    每份 `.DSN` 轉完就地對帳 `.asc`：接線不一致代表其中一邊是錯的，直接讓
+    init 停下來。階層錯掉不會讓任何東西崩潰，只會安靜地污染後續所有結論。
+    """
+    import ndd_hier
+    dsns = _scan_dsn(d)
+    missing = [r["key"] for r in rows]
+    if not dsns:
+        raise SystemExit(
+            "%s 底下沒有 .DSN。\n"
+            "  v2 需要 .DSN 才能取得階層與腳位功能名——那是 .asc 結構上給不了的。\n"
+            "  請把每塊板的 .DSN（含其子設計目錄）與 .asc、BOM 放在同一個資料夾。" % d)
+    tclsh, root = ndd_hier.find_cadence()      # 找不到就丟 HierError，不降級
+    echo("  Cadence: %s" % root)
+
+    by_asc = {}
+    for f in dsns:
+        echo("  轉換 %s ..." % f)
+        parts, nodes = ndd_hier.convert(os.path.join(d, f), outdir, tclsh=tclsh)
+        h = ndd_hier.Hierarchy(parts, nodes)
+        sc = h.selfcheck()
+        if not sc["ok"]:
+            raise SystemExit("%s 的階層 CSV 自我驗證失敗：\n%s"
+                             % (f, ndd_hier.format_report(f, sc, {"ok": True})))
+        refs = {r["base_refdes"] for r in h.real_parts()}
+        best, bk = 0.0, None
+        for r in rows:
+            if not r["nl"].parts:
+                continue
+            hit = len(refs & set(r["nl"].parts)) / float(len(r["nl"].parts))
+            if hit > best:
+                best, bk = hit, r["key"]
+        if best < 0.9:
+            raise SystemExit(
+                "%s 對不上任何一塊板（最高 refdes 命中率 %.0f%%）。\n"
+                "  請確認這份 .DSN 與資料夾裡的 .asc 是同一塊板、同一個版本。"
+                % (f, best * 100))
+        if bk in by_asc:
+            raise SystemExit("兩份 .DSN 都配到 %s：%s 與 %s" % (bk, by_asc[bk][0], f))
+        by_asc[bk] = (f, h, parts, nodes)
+
+    out = {}
+    for r in rows:
+        if r["key"] not in by_asc:
+            continue
+        f, h, parts, nodes = by_asc[r["key"]]
+        cc = ndd_hier.crosscheck(h, r["nl"])
+        if not cc["ok"]:
+            raise SystemExit(
+                "%s 與 %s 對帳不一致——其中一邊是錯的，先釐清再繼續：\n%s"
+                % (f, r["asc"], ndd_hier.format_report(f, {"ok": True, "parts": "-",
+                                                           "nodes": "-"}, cc)))
+        missing.remove(r["key"])
+        out[r["key"]] = dict(dsn=f, hier=h, cc=cc,
+                             parts_csv=os.path.basename(parts),
+                             nodes_csv=os.path.basename(nodes))
+    if missing:
+        raise SystemExit(
+            "這些板子沒有對應的 .DSN：%s\n"
+            "  v2 要求每塊板都提供 .DSN + .asc + BOM 三份。" % ", ".join(missing))
+    return out
 
 
 def _pair_boards(netlists, boms):
@@ -285,6 +379,25 @@ def _plan(d):
         print("\n  !! 有 %d 份 BOM 解析失敗，**不會參與配對**：" % len(skipped))
         for x, why in skipped:
             print("     %s —— %s" % (x, why))
+
+    print("\n[1b] .DSN（階層與腳位功能名）")
+    dsns = _scan_dsn(d)
+    if not dsns:
+        print("  !! 沒有 .DSN —— `--run` 會停下來。v2 要求每塊板 .DSN + .asc + BOM。")
+    else:
+        try:
+            import ndd_hier
+            _, root = ndd_hier.find_cadence()
+            print("  Cadence: %s" % root)
+        except Exception as exc:
+            print("  !! %s" % exc)
+        print("  找到 %d 份 .DSN：%s" % (len(dsns), ", ".join(dsns[:6])))
+        stems = {os.path.splitext(f)[0].lower() for f in dsns}
+        for r in rows:
+            hint = "（檔名相符）" if os.path.splitext(r["asc"])[0].lower() in stems else "**檔名對不上**"
+            print("     %-20s %s" % (r["key"], hint))
+        print("  實際配對在 `--run` 用 refdes 交集決定，並逐片與 .asc 對帳；"
+              "不一致就停下來。")
 
     boards = {r["key"]: (r["nl"], boms[r["bom"]]) for r in rows if r["bom"] in boms}
     print("\n[2] 連接器對接自動偵測")
@@ -509,12 +622,27 @@ def cmd_init(args):
             "  先跑 `ndd.py init %s --plan` 看候選清單。"
             % (", ".join(r["key"] for r in unresolved), args.dir))
 
+    # .DSN -> 階層 CSV。放在 init 最前面：對帳不過就沒有繼續的意義。
+    print("\n[階層] .DSN -> 階層與腳位功能名")
+    hier_dir = os.path.join(d, "hier")
+    dsn_info = _pair_dsn(rows, d, hier_dir)
+    for k, v in sorted(dsn_info.items()):
+        cc = v["cc"]
+        print("  %-20s %-34s nets %s 節點 %s 零件 %s  對帳 OK%s"
+              % (k, v["dsn"][:34], cc["nets"], cc["nodes"], cc["parts"],
+                 "（PADS 改名 %d 條）" % len(cc["renamed"]) if cc.get("renamed") else ""))
+
     boards_cfg = {}
     for r in rows:
-        boards_cfg[r["key"]] = {
+        k = r["key"]
+        boards_cfg[k] = {
             "label": os.path.splitext(r["asc"])[0], "asc": r["asc"],
             "bom": r["bom"], "bom_scope": "smt_only" if r["smt_hint"] else "complete",
-            "sheet": None, "ref_col": None, "expand_ranges": False}
+            "sheet": None, "ref_col": None, "expand_ranges": False,
+            "dsn": dsn_info[k]["dsn"],
+            # 設定檔一律用正斜線：ndd.json 會跟著專案在不同機器間移動
+            "hier_parts": "hier/" + dsn_info[k]["parts_csv"],
+            "hier_nodes": "hier/" + dsn_info[k]["nodes_csv"]}
 
     loaded = {r["key"]: (r["nl"], boms[r["bom"]]) for r in rows if r["bom"] in boms}
     acc, amb, rej = ([], [], [])
@@ -552,6 +680,8 @@ def cmd_init(args):
     results = []
     A = _cmd_args
 
+    syms = _run_step("pinfn —— symbol 腳位功能名入庫",
+                     lambda: _import_symbols(pj), results)
     _run_step("export —— 逐腳事實表", lambda: cmd_export(A(), pj), results)
     if not args.no_datasheets:
         _run_step("datasheets —— 盤點與下載", lambda: cmd_datasheets(A(), pj), results)
@@ -597,6 +727,16 @@ def cmd_init(args):
                     "        跑 `ndd.py blockers` 看完整排名。其他訊號腳多的優先"
                     "建模，只是終端的填 `endpoints` 就好。"
                     % "、".join("`%s`（%d 條）" % (p, e["chains"]) for p, e in top))
+    if syms and syms.get("conflict_lines"):
+        # 同一顆料號被標成兩個腳位名 = symbol 或 BOM 有一邊錯了。這種事沒有
+        # 症狀，也不會被任何其他檢查抓到，所以一定要進 SETUP.md 的待辦。
+        head = ("- [ ] **%d 組同料號的 symbol 腳位名不一致** —— 這幾筆"
+                "**沒有寫進** `verified-pins.csv`。同一顆料號在兩塊板（或同一"
+                "塊板的兩顆）被標成不同的腳位名，代表其中一邊的 symbol 建錯、"
+                "或 BOM 標錯料號；在釐清之前，這幾支腳的功能名一律以 datasheet "
+                "為準：") % len(syms["conflict_lines"])
+        todo.append("\n".join(
+            [head] + ["        - " + x for x in syms["conflict_lines"][:10]]))
     todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載與穿越件"
                 "逐一填進 `ndd.json` 的 `endpoints`")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/MISSING.md`")
@@ -647,7 +787,11 @@ def cmd_pins(args, pj):
                    or (pj.cfg.get("part_package") or {}).get(pn))
             model, edges, cav = transfer_for(pj.models, fp, pn,
                                              len(nl.pins(refdes)), pkg)
+            hier = pj.hier(b)
             print("== %s  [%s]" % (refdes, pj.label(b)))
+            if hier:
+                loc = hier.block_of(refdes)
+                print("   階層位置  : %s" % (loc or "（頂層原理圖）"))
             print("   footprint : %s" % fp)
             print("   BOM       : %s" % pn_of(bom, refdes))
             if edges:
@@ -662,10 +806,20 @@ def cmd_pins(args, pj):
             if cav:
                 print("   caveats   : %s" % C.render(cav))
             pins = nl.pins(refdes)
+            names = hier.pin_names() if hier else {}
+            low = hier.active_low() if hier else {}
             w = max([len(p) for p in pins] or [1])
+            # 功能名來自 Capture symbol（依 datasheet 建置），不是從 netlist
+            # 推出來的；`~` 前綴表示 symbol 上有上劃線＝低有效。
+            nw = max([len(names.get((refdes, p), "")) for p in pins] or [0]) + 1
             for p, net in pins.items():
+                fn = names.get((refdes, p), "")
+                if fn and (refdes, p) in low:
+                    fn = "~" + fn
                 mark = "   <-- 單腳懸空" if len(nl.net(net)) == 1 else ""
-                print("   pin %-*s  %s%s" % (w, p, net, mark))
+                print("   pin %-*s  %-*s  %s%s" % (w, p, nw, fn, net, mark))
+            if any((refdes, p) in low for p in pins):
+                print("   （`~` = symbol 上有上劃線，低有效）")
             print()
 
 
@@ -681,9 +835,13 @@ def cmd_net(args, pj):
                 conns = sorted(nl.net(n), key=lambda x: (refkey(x[0]), x[1]))
                 print("   %s  (%d pins)" % (n, len(conns)))
                 if args.verbose or len(names) == 1:
+                    hier = pj.hier(b)
+                    fns = hier.pin_names() if hier else {}
                     for rd, p in conns:
-                        print("        %-9s pin %-4s %-30s %s"
-                              % (rd, p, nl.parts.get(rd, "?"), pn_of(bom, rd)))
+                        fn = fns.get((rd, p), "")
+                        print("        %-9s pin %-4s %-14s %-30s %s"
+                              % (rd, p, fn[:14], nl.parts.get(rd, "?"),
+                                 pn_of(bom, rd)))
             if len(names) > args.limit:
                 print("   ... 另有 %d 條未列出" % (len(names) - args.limit))
             print()
@@ -715,12 +873,19 @@ def cmd_export(args, pj):
         os.makedirs(out)
     for b in pj.board_keys(args.board):
         nl, bom = pj.load(b)
+        hier = pj.hier(b)
+        paths = hier.part_paths() if hier else {}
+        fns = hier.pin_names() if hier else {}
+        low = hier.active_low() if hier else {}
         path = os.path.join(out, "pinmap_%s.csv" % b)
         with io.open(path, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.writer(fh)
+            # `hier_path` / `pin_name` / `active_low` 來自 .DSN（Capture symbol）。
+            # 沒有階層資料時整欄留空，欄位本身一律寫出——少一欄會讓下游
+            # 讀檔的人以為是格式壞了。
             w.writerow(["refdes", "pin", "net", "footprint", "part_number",
                         "value", "class", "stuffed", "bom_scope",
-                        "net_pin_count"])
+                        "net_pin_count", "hier_path", "pin_name", "active_low"])
             for rd in sorted(nl.parts, key=refkey):
                 d = bom.of(rd)
                 if is_ambiguous(d):
@@ -742,8 +907,14 @@ def cmd_export(args, pj):
                                 "" if is_ambiguous(pn) else (pn or ""),
                                 "" if is_ambiguous(val) else (val or ""),
                                 cls, stuffed, bom.scope,
-                                len(nl.net(net)) if net else ""])
-        print("寫出 %s  (%d parts / %d signals)" % (path, len(nl.parts), len(nl.nets)))
+                                len(nl.net(net)) if net else "",
+                                " / ".join(paths.get(rd) or []),
+                                fns.get((rd, p), ""),
+                                "1" if (rd, p) in low else ""])
+        print("寫出 %s  (%d parts / %d signals)%s"
+              % (path, len(nl.parts), len(nl.nets),
+                 "  階層 %d 顆 / 功能名 %d 支" % (len(paths), len(fns))
+                 if hier else "  （無階層資料）"))
 
 
 def cmd_mate(args, pj):
@@ -794,6 +965,9 @@ def cmd_trace(args, pj):
                   % (ba, ra, bb, rb, fab.mate_evidence.get((ba, ra, bb, rb), "")))
         print("")
     slot_rx = re.compile(tcfg.get("slot_pattern") or "$^")
+    # 階層只用來**加註**遠端落點在哪個子電路、那支腳的功能名叫什麼。
+    # BFS 一律只走 .asc 的連通——階層不得影響路徑。
+    hiers = {k: pj.hier(k) for k in pj.board_keys("all")}
     rows = []
     for st in starts:
         b, conn = st["board"], st["conn"]
@@ -854,9 +1028,17 @@ def cmd_trace(args, pj):
                         gat.append(fab.path_gating(epath))
                     cav |= fab.path_caveats(path)
                     gat.append(fab.path_gating(path))
+                    fh_ = hiers.get(tb)
                     rows.append(dict(
                         base, slot=slot, mid="%s.%s" % (mrd, mpin),
                         far_pin="%s.%s" % (trd, tpin), far_net=fnet or "",
+                        far_block=fh_.block_of(trd) if fh_ else "",
+                        far_pin_name=(fh_.pin_names().get((trd, tpin), "")
+                                      if fh_ else ""),
+                        # block 名合法地含空白（`LDO Bank #2`），不能用空白串接
+                        load_blocks=" | ".join(sorted({
+                            fh_.block_of(t.split(".")[0]) or "(頂層)"
+                            for t in loads})) if (fh_ and loads) else "",
                         n_loads=len(loads), loads=" ".join(sorted(loads)),
                         stops=" ".join(sorted(stops)),
                         endpoint_kind=";".join(sorted(kinds)),
@@ -873,8 +1055,15 @@ def cmd_trace(args, pj):
             print("%-22s rail %s  slot %s" % (r["signal"], r["rail"], r["slot"]))
             print("   起點  : %s" % r["start"])
             print("   hops  : %s" % r["hops"])
-            print("   -> %s = %s -> %s" % (r["mid"], r["far_pin"], r["far_net"]))
+            print("   -> %s = %s%s -> %s"
+                  % (r["mid"], r["far_pin"],
+                     ("（%s）" % r["far_pin_name"]) if r.get("far_pin_name") else "",
+                     r["far_net"]))
+            if r.get("far_block"):
+                print("   位於  : %s" % r["far_block"])
             print("   負載  : %d 個  %s" % (r["n_loads"], r["loads"][:120]))
+            if r.get("load_blocks"):
+                print("   分佈  : %s" % r["load_blocks"][:120])
             if r["stops"]:
                 print("   停點  : %s" % r["stops"][:120])
             print("   端點  : %s | gating %s | confidence %s"
@@ -889,7 +1078,8 @@ def cmd_trace(args, pj):
         os.makedirs(out)
     path = os.path.join(out, "signal_chain.csv")
     cols = ["rail", "signal", "slot", "start", "hops", "mid", "far_pin",
-            "far_net", "n_loads", "loads", "stops", "endpoint_kind",
+            "far_pin_name", "far_net", "far_block", "n_loads", "loads",
+            "load_blocks", "stops", "endpoint_kind",
             "gating", "caveats", "confidence"]
     with io.open(path, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=cols)
@@ -1193,6 +1383,20 @@ def cmd_migrate(args):
             "     但**不會被當成已解析的快取使用** —— 舊列若被當成有效，等於把\n"
             "     未鎖定封裝的資料洗成合法覆蓋。需要哪支腳就重跑 pinfn。" % mig)
 
+    no_hier = [k for k, b in (cfg.get("boards") or {}).items()
+               if not b.get("hier_parts")]
+    if no_hier:
+        # ⚠️ migrate **不會**自己去轉 .DSN——舊專案的資料夾裡通常根本沒有
+        #    .DSN。這裡只把「你這個專案沒有階層」講清楚，不要讓人以為
+        #    升級完就有了。
+        todo.append(
+            "這 %d 塊板沒有階層資料：%s\n"
+            "     v2.0 的階層與腳位功能名來自 `.DSN`，**migrate 不會自動補**。\n"
+            "     沒有階層一切照舊可用，只是 `pins` 不顯示子電路位置與功能名、\n"
+            "     pinmap 的 hier_path / pin_name 欄會是空的。\n"
+            "     要補：把各板 `.DSN` 放進資料夾，在**新的空資料夾**重跑 init。"
+            % (len(no_hier), ", ".join(no_hier[:6])))
+
     todo.append(
         "衍生產物請刪掉重跑：`export/`、`REVIEW.md`。欄位已變動\n"
         "     （signal_chain.csv 新增 caveats/confidence/endpoint_kind，\n"
@@ -1301,6 +1505,9 @@ def cmd_manifest(args, pj):
     ⚠️ `ndd.json` 也要入帳 —— 它含 mates / mate_map / net_normalize /
        power_net_regex / assertions / part_package / endpoints，每一項都直接
        改變結論。工具版本同理：工具邏輯本身會改變結論。
+
+    ⚠️ `.DSN` 也要入帳。它決定階層與腳位功能名，換版之後 `hier/*.csv` 就過期了
+       ——而過期的階層不會有任何症狀，只會安靜地把零件放錯子電路。
     """
     import datetime
     items = []
@@ -1314,6 +1521,10 @@ def cmd_manifest(args, pj):
         b = pj.cfg["boards"][k]
         add("netlist", os.path.join(pj.dir, b["asc"]))
         add("bom", os.path.join(pj.dir, b["bom"]))
+        # .DSN 是**輸入**（階層與腳位功能名的唯一來源），要入帳。
+        # hier/*.csv 是它的衍生物，可重生，不入帳。
+        if b.get("dsn"):
+            add("design", os.path.join(pj.dir, b["dsn"]))
     add("config", pj.path)
     add("models", os.path.join(pj.dir, "models.json"))
     ddir = os.path.join(pj.dir,
@@ -1621,17 +1832,50 @@ def cmd_review(args, pj):
     print("寫出 %s" % p)
 
 
+def _import_symbols(pj):
+    """把各板 symbol 腳位功能名匯入 `verified-pins.csv`。
+
+    ⚠️ 只匯入**名字**，不匯入任何解讀。symbol 沒有原文也沒有頁碼，回答不了
+       「這支腳做什麼」——那仍然只能由 datasheet 原文回答。這裡建立的是第二
+       個獨立來源，讓 datasheet 抽到的腳位名有東西可以對。
+    """
+    boards = []
+    for k in pj.board_keys("all"):
+        h = pj.hier(k)
+        if h is None:
+            continue
+        _nl, bom = pj.load(k)
+
+        def pn_of(rd, bom=bom):
+            v = bom.pn(rd)
+            return "" if (v is None or is_ambiguous(v)) else v
+
+        nodes = (pj.cfg["boards"][k].get("hier_nodes") or "")
+        boards.append((k, h, pn_of, os.path.join(pj.dir, nodes) if nodes else ""))
+    if not boards:
+        print("  （沒有任何板子有階層資料，略過）")
+        return {"written": 0, "kept": 0, "conflicts": []}
+    return ndd_pinfn.import_symbols(pj.dir, boards)
+
+
 def cmd_pinfn(args, pj):
     dcfg = pj.cfg.get("datasheets") or {}
     ddir = os.path.join(pj.dir, dcfg.get("dir", "datasheets"))
+    if getattr(args, "import_symbols", False):
+        return _import_symbols(pj)
     if args.list:
         _p, rows, mig = ndd_pinfn.load_cache(pj.dir)
         print("原文快取（%d 筆，其中 %d 筆為待重解析的舊 schema）" % (len(rows), mig))
         for r in rows:
-            print("  %-18s pin %-4s %-12s %-8s %s p.%s  [%s/%s]"
-                  % (r["part"], r["pin"], r["pin_name"], r["direction"],
-                     r["source_file"], r["page"], r.get("package") or "-",
-                     r.get("resolved_by") or "-"))
+            src = ("%s p.%s" % (r["source_file"], r["page"])
+                   if r.get("page") else r["source_file"])
+            print("  %-18s pin %-4s %-12s %-8s %-28s [%s/%s]%s"
+                  % (r["part"], r["pin"],
+                     ("~" if r.get("active_low") else "") + r["pin_name"],
+                     r["direction"], src, r.get("package") or "-",
+                     r.get("resolved_by") or "-",
+                     "  佐證 " + r["corroborated_by"] if r.get("corroborated_by")
+                     else ""))
         return
     part, observed = args.part, None
     if args.refdes and args.pin is None and args.part is not None:
@@ -1734,7 +1978,23 @@ def cmd_models(args, pj):
 
 
 # --------------------------------------------------------------------- main --
+def _utf8_stdio():
+    """輸出被導向檔案／管線時，Windows 會用系統 ANSI 頁（繁中是 cp950）編碼，
+    遇到 `↔`、`⚠` 這種字直接丟 UnicodeEncodeError 讓整個指令中斷——而使用者
+    把報告導進檔案正是最常見的用法。導向時一律改用 UTF-8；接主控台時不動
+    （Windows 主控台走 WriteConsoleW，本來就處理得了）。"""
+    for st in (sys.stdout, sys.stderr):
+        try:
+            if not st.isatty():
+                st.reconfigure(encoding="utf-8", errors="replace")
+            else:
+                st.reconfigure(errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv=None):
+    _utf8_stdio()
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config")
@@ -1761,7 +2021,7 @@ def main(argv=None):
     p = sub.add_parser("trace"); p.add_argument("--signal"); p.set_defaults(func=cmd_trace)
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
-    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--pick", type=int); p.add_argument("--list", action="store_true"); p.set_defaults(func=cmd_pinfn)
+    p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--pick", type=int); p.add_argument("--list", action="store_true"); p.add_argument("--import-symbols", action="store_true", dest="import_symbols", help="把 .DSN 的 symbol 腳位功能名匯入快取"); p.set_defaults(func=cmd_pinfn)
     p = sub.add_parser("models")
     p.add_argument("--examples", action="store_true", help="列出可複製的範例模型")
     p.add_argument("--add", nargs="+", metavar="名稱", help="把範例複製進專案（all = 全部）")

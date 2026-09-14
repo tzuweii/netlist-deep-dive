@@ -23,30 +23,54 @@ import fixtures                                                # noqa: E402
 import ndd                                                     # noqa: E402
 
 
-def _folder(two_boards=True, ambiguous_bom=False):
-    """建一個只有 .asc 與 .xlsx 的資料夾（模擬使用者剛丟檔案進來）。"""
+_RESTORE = []
+
+
+def _folder(two_boards=True, ambiguous_bom=False, with_dsn=True):
+    """建一個只有 .DSN / .asc / .xlsx 的資料夾（模擬使用者剛丟檔案進來）。
+
+    v2 起 `.DSN` 是必要輸入。轉換需要 Capture，測試環境不該依賴它——所以這裡
+    預先產好階層 CSV，並把 `ndd_hier.convert` 換成查表。**被替換掉的只有「跑
+    tclsh」那一步**，配對、自我驗證與 `.asc` 對帳全部照真實路徑走。
+    """
     d = tempfile.mkdtemp(prefix="ndd_init_")
-    # a 板：起點連接器 + 12 腳對接連接器
-    fixtures.write_asc(
-        os.path.join(d, "board_a.asc"),
-        {"JX": "Conn_HDR", "U1": "PKG8"},
-        {"SIG_%d" % i: [("JX", str(i)), ("U1", str(min(i, 8)))] for i in range(1, 9)})
-    rows_a = [{"Part Reference": "JX", "Manufacturer_PN": "CONN_X"},
-              {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"}]
-    fixtures.write_bom(os.path.join(d, "bom_a.xlsx"), rows_a)
+    mapping = {}
+
+    def board(key, parts, nets, rows):
+        fixtures.write_asc(os.path.join(d, "%s.asc" % key), parts, nets)
+        fixtures.write_bom(os.path.join(d, "bom_%s.xlsx" % key.split("_")[-1]), rows)
+        if with_dsn:
+            dsn = os.path.join(d, "%s.DSN" % key)
+            io.open(dsn, "w", encoding="utf-8").write("stub")
+            hd = os.path.join(d, "_hier_fixture")
+            if not os.path.isdir(hd):
+                os.makedirs(hd)
+            mapping[os.path.abspath(dsn)] = fixtures.write_hier(
+                os.path.join(hd, "%s_parts.csv" % key),
+                os.path.join(hd, "%s_nodes.csv" % key), parts, nets)
+
+    board("board_a", {"JX": "Conn_HDR", "U1": "PKG8"},
+          {"SIG_%d" % i: [("JX", str(i)), ("U1", str(min(i, 8)))] for i in range(1, 9)},
+          [{"Part Reference": "JX", "Manufacturer_PN": "CONN_X"},
+           {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"}])
     if two_boards:
-        fixtures.write_asc(
-            os.path.join(d, "board_b.asc"),
-            {"JY": "Conn_RCPT", "U9": "PKG8"},
-            {"SIG_%d" % i: [("JY", str(i)), ("U9", str(min(i, 8)))]
-             for i in range(1, 9)})
         rows_b = [{"Part Reference": "JY", "Manufacturer_PN": "CONN_Y"},
                   {"Part Reference": "U9", "Manufacturer_PN": "DAC_A"}]
         if ambiguous_bom:
             # 讓 b 板的 BOM 也含 a 板的 refdes -> 兩份 BOM 都像是 a 板的
-            rows_b += rows_a
-        fixtures.write_bom(os.path.join(d, "bom_b.xlsx"), rows_b)
+            rows_b += [{"Part Reference": "JX", "Manufacturer_PN": "CONN_X"},
+                       {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"}]
+        board("board_b", {"JY": "Conn_RCPT", "U9": "PKG8"},
+              {"SIG_%d" % i: [("JY", str(i)), ("U9", str(min(i, 8)))]
+               for i in range(1, 9)}, rows_b)
+    if with_dsn:
+        _RESTORE.append(fixtures.stub_convert(mapping))
     return d
+
+
+def tearDownModule():
+    while _RESTORE:
+        _RESTORE.pop()()
 
 
 class TestInitPlan(unittest.TestCase):

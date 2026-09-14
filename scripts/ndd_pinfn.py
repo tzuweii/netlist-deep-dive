@@ -28,7 +28,7 @@ import time
 CACHE = "verified-pins.csv"
 COLS = ["part", "pin", "pin_name", "direction", "text",
         "source_file", "page", "sha256", "package", "resolved_by",
-        "corroborated_by", "verified_on"]
+        "corroborated_by", "active_low", "verified_on"]
 LEGACY_COLS = ["part", "pin", "pin_name", "direction", "text",
                "source_file", "page", "sha256", "verified_on"]
 
@@ -37,7 +37,15 @@ LEGACY_COLS = ["part", "pin", "pin_name", "direction", "text",
 NOT_APPLICABLE = "not_applicable"        # 只抽到一筆，**已證明**無歧義
 USER_CONFIRMED = "user_confirmed"        # 多筆，使用者用 --pick 指定
 UNRESOLVED = "unresolved_pending_user"   # 多筆且未指定 -> [?]，拒絕寫快取
+SYMBOL = "capture_symbol"                # 由 .DSN 的 Capture symbol 帶出的腳位名
 RESOLVED_OK = (NOT_APPLICABLE, USER_CONFIRMED)
+
+# ⚠️ **symbol 列不算 datasheet 列。**
+#    symbol 的腳位名是照 datasheet 建的，所以名字可信；但它**沒有原文、沒有
+#    頁碼**，回答不了「這支腳是做什麼的」。所以 `SYMBOL` 不放進 `RESOLVED_OK`
+#    ——有 symbol 列不會讓 datasheet 抽取被跳過，兩者是互相佐證的關係，不是
+#    互相取代。真正的價值在於：名字對得起來 = 兩個獨立來源說同一件事；對不
+#    起來 = 封裝選錯或 symbol 建錯，必須當場攤開給人看。
 
 # ⚠️ 腳位表至少有三種排版，只認一種會**靜靜漏掉正確的列**——那比抽不到更危險。
 PIN_FIRST_RX = re.compile(
@@ -231,6 +239,130 @@ def append_cache(project_dir, row):
         w.writerow({c: row.get(c, "") for c in COLS})
 
 
+# ------------------------------------------------- Capture symbol 腳位名 --
+def norm_name(n):
+    """比對用的正規化：大小寫與分隔符（`/`、`_`、空白、反斜線、`#`）不算差異。
+
+    ⚠️ **`+` 與 `-` 一定要留著。** `SENSE3+` 與 `SENSE3-` 是兩支不同的腳，
+       一起正規化掉會讓差動對的兩隻腳看起來同名 —— 該報衝突的地方變成靜靜
+       合併，而且合併後留下的是哪一個完全看順序。
+    """
+    return re.sub(r"[^A-Z0-9+\-]", "", (n or "").upper())
+
+
+def symbol_names(hier, pn_of_refdes):
+    """單一板：-> {(MPN, pin): (name, active_low, [refdes...])}，衝突另計。
+
+    回傳 (對映, 衝突清單)。衝突 = 同一 MPN 的同一支腳，不同 refdes 的 symbol
+    給出不同名字 —— 代表其中一顆用錯 symbol 或 BOM 標錯料號，**不可合併**。
+    """
+    names, low = hier.pin_names(), hier.active_low()
+    bucket = {}
+    for (rd, pin), nm in names.items():
+        mpn = pn_of_refdes(rd)
+        if not mpn:
+            continue
+        bucket.setdefault((mpn, pin), {}).setdefault(
+            norm_name(nm), [nm, (rd, pin) in low, []])[2].append(rd)
+    out, conflicts = {}, []
+    for key, variants in bucket.items():
+        if len(variants) > 1:
+            conflicts.append((key[0], key[1],
+                              {v[0]: sorted(v[2]) for v in variants.values()}))
+            continue
+        nm, al, rds = list(variants.values())[0]
+        out[key] = (nm, al, sorted(rds))
+    return out, conflicts
+
+
+def replace_symbol_rows(project_dir, rows):
+    """整批換掉快取裡的 symbol 列（不動 datasheet 列）。
+
+    ⚠️ 用「先寫暫存再置換」——直接原地重寫時中途掛掉會把人工確認過的
+       datasheet 列一起弄丟，那是無法從任何地方重建的資產。
+    """
+    p = os.path.join(project_dir, CACHE)
+    _p, old, _m = load_cache(project_dir)
+    keep = [r for r in old if r.get("resolved_by") != SYMBOL]
+    tmp = p + ".tmp"
+    with io.open(tmp, "w", encoding="utf-8-sig", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=COLS)
+        w.writeheader()
+        for r in keep + rows:
+            w.writerow({c: r.get(c, "") for c in COLS})
+    if os.path.exists(p):
+        os.remove(p)
+    os.rename(tmp, p)
+    return len(keep), len(rows)
+
+
+def import_symbols(project_dir, boards, verbose=True):
+    """把各板 `.DSN` 的 symbol 腳位名寫進快取。
+
+    `boards`: [(board_key, hier, pn_of_refdes, nodes_csv_path), ...]
+    """
+    merged, conflicts, seen_src = {}, [], {}
+    for key, hier, pn_of, nodes_csv in boards:
+        if hier is None:
+            continue
+        got, conf = symbol_names(hier, pn_of)
+        conflicts.extend((key,) + c for c in conf)
+        src = os.path.basename(nodes_csv) if nodes_csv else ""
+        for k, (nm, al, rds) in got.items():
+            prev = merged.get(k)
+            if prev and norm_name(prev[0]) != norm_name(nm):
+                # 跨板同一料號給出不同名字——同樣不可合併
+                conflicts.append((key, k[0], k[1],
+                                  {prev[0]: prev[2], nm: ["%s:%s" % (key, r)
+                                                          for r in rds]}))
+                merged.pop(k, None)
+                continue
+            if prev:
+                prev[2].extend("%s:%s" % (key, r) for r in rds)
+                continue
+            merged[k] = [nm, al, ["%s:%s" % (key, r) for r in rds]]
+            seen_src[k] = (src, nodes_csv)
+    bad = {(c[1], c[2]) for c in conflicts}
+    rows, today = [], time.strftime("%Y-%m-%d")
+    for (mpn, pin), (nm, al, rds) in sorted(merged.items()):
+        if (mpn, pin) in bad:
+            continue
+        src, path = seen_src[(mpn, pin)]
+        rows.append({"part": mpn, "pin": pin, "pin_name": nm, "direction": "",
+                     "text": "", "source_file": src, "page": "",
+                     "sha256": sha256(path) if path and os.path.exists(path) else "",
+                     "package": "", "resolved_by": SYMBOL,
+                     "corroborated_by": " ".join(rds[:4]),
+                     "active_low": "1" if al else "",
+                     "verified_on": today})
+    kept, wrote = replace_symbol_rows(project_dir, rows)
+    if verbose:
+        print("  symbol 腳位名：寫入 %d 筆（保留 %d 筆 datasheet 原文列）"
+              % (wrote, kept))
+        n_low = sum(1 for r in rows if r["active_low"])
+        if n_low:
+            print("  其中 %d 支為低有效（symbol 上有上劃線）" % n_low)
+        if conflicts:
+            print("  !! %d 組同料號腳位名不一致，**未寫入**，請人工釐清："
+                  % len(conflicts))
+            for c in conflicts[:8]:
+                print("     %s pin %s" % (c[1], c[2]))
+                for nm, rds in sorted(c[3].items()):
+                    print("       %-14s %s%s"
+                          % (nm, " ".join(rds[:3]),
+                             " …共 %d 顆" % len(rds) if len(rds) > 3 else ""))
+    return {"written": len(rows), "kept": kept, "conflicts": conflicts,
+            "active_low": sum(1 for r in rows if r["active_low"]),
+            "conflict_lines": [
+                "`%s` pin %s —— %s" % (
+                    c[1], c[2],
+                    " vs ".join("`%s`（%s%s）"
+                                % (nm, " ".join(rds[:2]),
+                                   " 等 %d 顆" % len(rds) if len(rds) > 2 else "")
+                                for nm, rds in sorted(c[3].items())))
+                for c in conflicts]}
+
+
 def lookup(project_dir, ddir, part, pin, explicit=None, package="",
            pick=None, verbose=True):
     """先查快取（含 SHA 有效性），未命中才抽取。回傳 list[dict]。
@@ -301,13 +433,30 @@ def lookup(project_dir, ddir, part, pin, explicit=None, package="",
 
     chosen = hits if len(hits) == 1 else [hits[pick - 1]]
     resolved = NOT_APPLICABLE if len(hits) == 1 else USER_CONFIRMED
+    # symbol 是**獨立來源**：名字對得上就互相佐證，對不上就要當場講出來。
+    # 最常見的成因是封裝選錯（同料號不同封裝腳位不同），靜靜採用 datasheet
+    # 那筆等於把錯誤封裝的腳位名凍結成資產。
+    sym = [r for r in rows
+           if r["part"].upper() == part.upper() and r["pin"] == str(pin)
+           and r.get("resolved_by") == SYMBOL]
     out = []
     for page, name, direction, text, _kind, _pins in chosen:
+        corro = ""
+        if sym:
+            if norm_name(sym[0]["pin_name"]) == norm_name(name):
+                corro = "%s(%s)" % (SYMBOL, sym[0]["pin_name"])
+            elif verbose:
+                print("!! symbol 說這支腳是 %s，datasheet 這筆是 %s —— "
+                      "兩個來源不一致。" % (sym[0]["pin_name"], name))
+                print("   最常見是封裝選錯；請確認封裝後用 --pick / --package "
+                      "指定，或回頭檢查 symbol。")
         row = {"part": part, "pin": str(pin), "pin_name": name,
                "direction": direction, "text": text,
                "source_file": src, "page": str(page), "sha256": sha,
                "package": package or "", "resolved_by": resolved,
-               "corroborated_by": "", "verified_on": time.strftime("%Y-%m-%d")}
+               "corroborated_by": corro,
+               "active_low": (sym[0].get("active_low") or "") if sym else "",
+               "verified_on": time.strftime("%Y-%m-%d")}
         append_cache(project_dir, row)
         out.append(row)
         if verbose:

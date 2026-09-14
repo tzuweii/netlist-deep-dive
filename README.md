@@ -1,10 +1,16 @@
 # netlist-deep-dive
 
-> A Claude Code skill for deep PCB circuit analysis from PADS 2000 ASCII netlists (`.asc`) and PCBA BOMs (`.xlsx`).
-> Produces queryable pin-map CSVs, cross-board end-to-end signal chains, a separate functional-topology hint output, an auditable architecture document, and a human-review checklist.
+> A Claude Code skill for deep PCB circuit analysis from OrCAD Capture designs (`.DSN`), PADS 2000 ASCII netlists (`.asc`) and PCBA BOMs (`.xlsx`).
+> Produces queryable pin-map CSVs, cross-board end-to-end signal chains, design hierarchy and symbol pin names, a separate functional-topology hint output, an auditable architecture document, and a human-review checklist.
 
-給 Claude Code 用的 skill：輸入 **`.asc` netlist + BOM**，產出可查詢的 pinmap CSV、
-跨板端到端訊號鏈、功能拓樸提示、架構文件、自動稽核報告與人工複驗清單。跨專案通用。
+給 Claude Code 用的 skill：每塊板輸入三份 **`.DSN` + `.asc` netlist + BOM**，產出可查詢的
+pinmap CSV、跨板端到端訊號鏈、階層與腳位功能名、功能拓樸提示、架構文件、自動稽核報告與
+人工複驗清單。跨專案通用。
+
+三份各自不可取代：`.asc` 給**接線**（每塊板都適用的權威），BOM 給**身分與貼件狀態**，
+`.DSN` 給**階層**（零件在哪個子電路）與**腳位功能名**（`SENSE3+`、低有效標記）。
+`.DSN` 由 `init` 透過 Capture 自己的 TCL API **唯讀**轉出，轉完**逐條對帳 `.asc`**，
+不一致就停下來。
 
 ---
 
@@ -24,7 +30,10 @@ netlist 是逐 net 的文字檔，人工追一條跨板訊號要翻很多層；�
 git clone https://github.com/tzuweii/netlist-deep-dive .claude/skills/netlist-deep-dive
 ```
 
-需求：Python 3.8+、`openpyxl`、`pypdf`、`curl`（下載 datasheet 用，非必要）。
+需求：Python 3.8+、`openpyxl`、`pypdf`、`curl`（下載 datasheet 用，非必要），
+以及 **OrCAD Capture**（讀 `.DSN` 用；`init` 自動偵測 `C:\Cadence\SPB_*`，取版本最高
+的一套）。**工具絕不寫入 Cadence 安裝目錄。** 沒有 Capture 就無法處理 `.DSN`，
+`init` 會失敗而不是降級。
 
 ```bash
 cd .claude/skills/netlist-deep-dive
@@ -81,6 +90,7 @@ python ndd.py pins U939     # 逐腳列出 net + 料號
 python ndd.py net TX_CLK    # 某條網路上有誰
 python ndd.py part SN74CBT  # 依 refdes / footprint / 料號搜尋
 python ndd.py blockers      # 訊號鏈停在哪些料號上（建模投報率）
+python ndd.py pinfn --import-symbols   # 重建 symbol 腳位名（init 已跑過）
 python ndd.py review        # 產出人工複驗清單 REVIEW.md
 ```
 
@@ -113,6 +123,9 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
    系統性偏移。
 8. **降級標記優於硬拒絕** —— 但標記必須沿路徑傳遞到最終輸出，否則等於沒標。
 9. **原始來源是資產，結論是拋棄式的。**
+10. **交叉驗證是唯一抓得到「安靜錯誤」的東西** —— 階層寫錯不會讓任何東西崩潰，
+    只會給出可信但錯誤的答案。所以 `.DSN` 與 `.asc` 對不上時 `init` 直接中止，
+    不是記一行警告。
 
 > netlist 證明「接線意圖」，layout 證明「實體位置」，只有系統行為能證明「兩者都對」。
 > 三者不能互相取代。
@@ -125,12 +138,14 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |
-| `references/verification.md` | 三層驗證方法，以及**結構上驗不到**的四類 |
+| `references/verification.md` | 分層驗證方法，以及**結構上驗不到**的四類 |
 | `references/datasheets.md` | datasheet 取得的實測限制 |
 | `references/example-ndd.json` | 去識別化的設定範例，逐欄註解 |
 | `references/example-models.json` | 可複製的元件模型範例（**不自動載入**） |
 | `scripts/ndd.py` | CLI 進入點 |
 | `scripts/ndd_pads.py` | netlist 解析 + 獨立邏輯的自我驗證 |
+| `scripts/ndd_hier.py` | `.DSN` 階層：找 Cadence、轉換、解析、自我驗證、與 `.asc` 對帳 |
+| `scripts/ndd_export.tcl` | 隨 skill 發佈的**唯讀** Capture TCL 匯出器 |
 | `scripts/ndd_bom.py` | BOM 解析、ambiguity、`bom_scope` |
 | `scripts/ndd_confidence.py` | confidence／gating 兩軸與 caveat 的唯一定義處 |
 | `scripts/ndd_pinfn.py` | datasheet 原文抽取與快取（**不做封裝判定**） |
@@ -150,7 +165,12 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 
 ## 限制
 
-- 目前只支援 **PADS 2000 ASCII** 格式的 netlist。
+- netlist 只支援 **PADS 2000 ASCII**；階層只支援 **OrCAD Capture `.DSN`**。
+- **`.DSN` 不能同時開在 Capture 裡**（旁邊會有 `.DSNlck`）。開著的檔案去讀會
+  **無限等待**而不是報錯，所以工具會先擋下來要求你關閉。
+- **symbol 給名字，datasheet 給行為。** symbol 的腳位名照 datasheet 建，名字可
+  引用（標 `[S]`）；但它沒有原文也沒有頁碼，方向、極性、內部行為一律仍然只能
+  由 datasheet 原文回答。
 - datasheet 自動下載只對少數原廠站有效；其餘需人工補上。
 - **工具不解析 datasheet 的腳位表。** 每家排版都不同（腳註標記、跨行儲存格、
   文字層把兩個腳號併成一個），通用地「看懂」是無底洞，而且一列錯位就讓整張表

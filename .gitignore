@@ -11,3 +11,15 @@ datasheets/
 *.asc
 *.xlsx
 *.xlsm
+
+# OrCAD Capture 設計檔與它的衍生物。.DSN 是專有的板子設計，絕不進 git。
+*.DSN
+*.DSNlck
+*.dsn
+hier/
+SETUP.md
+# 本機測試用的板子資料夾（真實專案檔）
+/dsn/
+
+# Claude Code 的本機設定（每台機器不同）
+.claude/settings.local.json
