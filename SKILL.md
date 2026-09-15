@@ -32,10 +32,11 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 | `references/verification.md` | **Phase 4 一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
 | `references/datasheets.md` | 需要 datasheet 時讀 |
 
-工具在 `scripts/`，進入點是 `ndd.py`。**所有指令都要加 `PYTHONIOENCODING=utf-8`**
-（cp950 終端機會把中文輸出變亂碼）。
+工具在 `scripts/`，進入點是 `ndd.py`。回歸測試：
+`python -m unittest discover -s tests`，改動工具後一定要跑。
 
-回歸測試：`python -m unittest discover -s tests`。改動工具後一定要跑。
+Windows 上兩件事：**路徑用 `C:/...`**（Git Bash 的 `/c/...` Python 讀不到）；
+**檔名含 CJK 相容表意字時 Bash 處理不了**，改用 PowerShell 或 Glob/Read。
 
 ---
 
@@ -170,43 +171,19 @@ symbol 的腳位名是照 datasheet 建的，所以**名字**可信，可直接�
 
 ## Phase 0 — 收檔案、建專案（`init` 一次跑完）
 
-### ⚠️ 先確認這個資料夾是不是已經建過專案
+### ⚠️ 資料夾裡已有 `ndd.json` 就走 `migrate`，不要跑 `init`
+
+`init` 會覆蓋設定檔——手寫的斷言、命名規則、對接關係全部消失。工具會擋下來
+並指向 `migrate`，但**不要靠工具擋**：看到 `ndd.json` 就該直接用 `migrate`。
 
 ```bash
-python scripts/ndd.py version          # 這台機器裝的是哪一版
-ls <分析資料夾>/ndd.json               # 已經有就**不要跑 init**
-```
-
-**已有 `ndd.json` 就走 `migrate`，不要跑 `init`：**
-
-```bash
+python scripts/ndd.py version "<分析資料夾>"      # 哪一版建的、缺什麼
 python scripts/ndd.py migrate "<分析資料夾>" --run
 ```
 
-`init` 會覆蓋設定檔——手寫的斷言、命名規則、對接關係全部消失。工具會擋下來
-並指向 `migrate`，但**不要靠工具擋**：看到資料夾裡有 `ndd.json` 就該直接用
-`migrate`。
-
-`migrate --run` 會升級設定、還原 v0 內建的模型（只加專案用得到的）、重跑所有
-流程並產出升級報告，**保留使用者手寫的東西**。
-
 **被要求「更新 skill 並升級某個資料夾」時，照 `UPGRADING.md` 做** —— 那份流程
-版本無關，每一版都適用。先跑 `ndd.py version "<資料夾>"` 看專案缺什麼。
-
-**v1.8 -> v2.0**：把各板 `.DSN` 放進**原本那個資料夾**再跑 `migrate --run`，
-它會轉換、對帳、補上階層設定（原檔另存 `ndd.json.pre-v2.bak`），並把 symbol
-腳位名寫進快取。**不要為了補階層而重跑 `init`** —— 那會覆蓋掉手寫設定。
-
-| 情況 | `migrate` 的處置 |
-|---|---|
-| 資料夾裡沒有 `.DSN` | 照常升級，專案維持沒有階層；報告列出缺哪幾塊板 |
-| 某板 `.DSN` 對不上 `.asc` | **那塊板不寫入階層**，其餘照常升級完，報告帶完整對帳細節 |
-| 這台機器沒有 Capture | 用 `--no-hier` 明確跳過 |
-| 已經有階層 | 不重跑轉換（那要 license、要幾分鐘） |
-
-⚠️ 和 `init` 的硬失敗不同，而且是刻意的：`init` 時什麼都還沒有，停下來零成本；
-`migrate` 時已經有一個能用的專案，為了一份對不上的 `.DSN` 把它弄壞比沒有階層
-更糟。**看得見的缺席優於看不見的錯誤。**
+版本無關，每一版都適用。版本專屬的事（該版需要的新輸入檔、`migrate` 對不上時
+的處置）在 `CHANGELOG.md` 各版的「升級」小節。
 
 ---
 
@@ -220,7 +197,7 @@ python scripts/ndd.py migrate "<分析資料夾>" --run
 2. **先看 init 打算怎麼做**（只讀，不寫任何檔案）：
 
 ```bash
-PYTHONIOENCODING=utf-8 python scripts/ndd.py init "C:/path/to/analysis" --plan
+python scripts/ndd.py init "C:/path/to/analysis" --plan
 ```
 
 會印出三件事：netlist ↔ BOM 配對（**用 refdes 交集，不用檔名猜**）、連接器對接
@@ -246,17 +223,8 @@ python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>
 結論都會建立在錯的基礎上而不會有任何症狀**。看到它停下來，先釐清檔案版本，
 不要想辦法繞過。
 
-轉換時的畫面長這樣（六片實測）：
-
-```
-[階層] .DSN -> 階層與腳位功能名
-  Cadence: C:\Cadence\SPB_22.1
-  b0017_dpu_v1  ... nets (2502, 2502) 節點 (14813, 14813) 零件 (3761, 3761)  對帳 OK
-  t_radar_t2    ... nets (1402, 1402) 節點 (7069, 7069) 零件 (1955, 1955)  對帳 OK（PADS 改名 7 條）
-```
-
-「PADS 改名 N 條」是正常的：`.asc` 不收 `*`、`/` 這類字元，formatter 會把整條
-net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
+對帳結果裡的「PADS 改名 N 條」是正常的：`.asc` 不收 `*`、`/` 這類字元，
+formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
 **`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
 
 產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、
@@ -348,40 +316,22 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者是互相佐證，�
 
 ### 封裝判定只用 netlist + BOM
 
-**工具不解析 datasheet 的腳位表。** 每家排版都不同，通用地「看懂」是無底洞，
-而且一列錯位整張表就作廢。改用三個證據來源排名（同 `mate` 的機制）：
-
-| 來源 | 標記 |
-|---|---|
-| **模型宣告的電源/接地腳，實際接在哪** | `[N]` |
-| 訂購碼的封裝後綴（`…PW` / `…BS`） | `[B]` |
-| layout 的 footprint 名稱 | `[N]` |
-
-`ndd.py audit` 的 [1.5] 段會逐顆列出判定與證據：
-
-```
-[?]  a.U1 (EXP_APW) [?] 推論 PKGA16（margin 4）：
-     拓樸[N] 16:PWR✓ 8:GND✓；料號後綴[B] ✓；footprint[N] ✓
-待辦 a.U3 (EXP_A)  [?] 待補：候選 PKGA16／PKGB16；證據不足
-```
+**工具不解析 datasheet 的腳位表**（每家排版不同，一列錯位整張表就作廢）。改用
+三個證據排名：模型宣告的電源/接地腳實際接在哪 `[N]`、訂購碼的封裝後綴 `[B]`、
+layout 的 footprint 名稱 `[N]`。`audit` 的 [1.5] 段會逐顆列出判定與證據。
 
 **推論出來的一律標 `[?]`**，並帶 `package:inferred` caveat 沿路徑傳到 CSV。
 門檻是「零矛盾 + 唯一勝出 + 至少一個獨立來源佐證」，達不到就列入待補，
-**不替你假設**。要定案就填 `ndd.json` 的 `part_package`。
+**不替你假設**。要定案就填 `ndd.json` 的 `part_package`——但即使你明確宣告，
+若與 netlist 矛盾仍會 FAIL（**人講的最大，但矛盾要講出來**）。
 
-⚠️ 即使你明確宣告，若與 netlist 矛盾仍會 FAIL——**人講的最大，但矛盾要講出來**。
+排名機制與 `pin_roles` 的角色見 `references/models.md`。
 
 ### pinfn 抽到多筆時不替你挑
 
-```
-!! pin 14 抽到 2 筆（這份 datasheet 可能涵蓋多種封裝）。拒絕替你挑，也不寫快取。
-   [1] p.4  SCL   腳號欄位 14,12   serial clock line
-   [2] p.4  VDD   腳號欄位 16,14   supply voltage
-   -> --pick <n> [--package <標籤>]
-```
-
-腳號欄位直接攤在眼前，你 5 秒就能對照 audit 的封裝判定選定。**抽到一筆才是
-已證明無歧義**，才會自動寫入快取。
+一份 datasheet 涵蓋多種封裝時，`pinfn` 會把每筆的頁碼、腳位名與**腳號欄位**
+攤出來，要你 `--pick <n> [--package <標籤>]`，**在那之前不寫快取**。對照 audit
+的封裝判定即可選定。**抽到一筆才是已證明無歧義**，才會自動寫入快取。
 
 ### 元件模型（選用，非前提）
 
@@ -391,41 +341,23 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者是互相佐證，�
 python ndd.py blockers      # 訊號鏈停在哪些料號上、各擋住幾條
 ```
 
-```
-MPN                          擋住鏈路  顆數  其他訊號腳  DS  建議
-X-Band PGA chip v3 LTCC…       1188    16        13     無  **很可能是穿越件 —— 優先建模**
-SN74LV595AQWBQBRQ1              612    16         9     有  **很可能是穿越件 —— 優先建模**
-TMP100NA/3K                      36     1         1     無  先宣告 endpoints，確認是不是終端
-```
+輸出的「其他訊號腳」= 該顆除了訊號停住的那支腳外，還有幾支接在**非電源**網路
+上。數字大代表訊號很可能還會繼續走——這是**只用 netlist** 就能算的穿越件跡象。
 
-「其他訊號腳」= 該顆除了訊號停住的那支腳外，還有幾支接在**非電源**網路上。
-數字大代表訊號很可能還會繼續走——這是**只用 netlist** 就能算的穿越件跡象。
-
-⚠️ 舊版的規則是「同一顆 IC 被追第二次以上才值得建」，但那要靠**跨 session
-的記憶**才能執行——AI 沒有，人也不會去數。**規則寫成靠記憶執行的判斷，等於
-沒有規則。** 改成讓工具數。
-
-**只是終端負載的，填 `ndd.json` 的 `endpoints` 就好，不需要建模也不需要
-datasheet。** schema 與規則見 `references/models.md`。要點：
-
-- `direction` 必須顯式（`forward` / `bidirectional`），沒有預設值
-- `pin_roles` 記下 VSS/VDD 是哪幾支腳（成本趨近於零，卻是封裝判定的主要證據）
-- `gate`（通不通）與 `parameter_control`（通過後的性質）要分開
-- `always` 由 netlist 推導，不可手寫
-- **範例模型在 `references/example-models.json`，但不會自動載入**：
+**只是終端負載的，填 `ndd.json` 的 `endpoints` 就好**，不需要建模也不需要
+datasheet。
 
 ```bash
-python ndd.py models --examples        # 看有哪些
+python ndd.py models --examples        # 看有哪些範例
 python ndd.py models --add PCA9547     # 複製進專案的 models.json
-python ndd.py models --add all
 ```
 
-  為什麼要手動複製：模型是「某人對 datasheet 的解讀」。自動塞進每個專案等於
-  讓你在不知情下用別人的解讀去追訊號。複製這個動作讓它變成**你的宣告**，
-  `audit` / `REVIEW.md` 才會把它列進你要複核的清單。
+範例**不會自動載入，要手動複製**——模型是「某人對 datasheet 的解讀」，複製這個
+動作讓它變成**你的宣告**，`audit` / `REVIEW.md` 才會把它列進你要複核的清單。
+範例的 `pin_roles` 多半留空，那要翻 datasheet 才能填，**不要憑印象**。
 
-  ⚠️ 範例的 `pin_roles` 全部留空、多數 `package` 也空著 —— 那些要翻 datasheet
-  才能填，**不要憑印象**。沒填也能用，只是封裝不會被 netlist 交叉驗證。
+schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界、`always`
+必須由 netlist 推導 —— 全部見 `references/models.md`。
 
 ## Phase 4 — 驗證（先讀 `references/verification.md`）
 
@@ -448,9 +380,7 @@ python scripts/ndd.py audit       # 完整稽核
 | `inferred` | 直通唯一勝出 + 零矛盾 + margin ≥ 2 | 無 caveat，標 `[?]` |
 | `ambiguous` | 排名決定不了 | `mate:ambiguous`，confidence 降為 unknown |
 
-這不是放寬標準，而是把本文件早就寫下的原則落實成程式：**殘存候選要用「會不會
-壞」排除；實際出貨的板子是接著線在跑的，對應若錯 netlist 根本對不上，早就會被
-發現**。只有排名真的分不出來時才需要 layout／線束圖／實測。
+只有排名真的分不出來時才需要 layout／線束圖／實測。
 
 **殘存候選要用「會不會壞」排除**：代入後看它會不會造成立即而明顯的故障
 （SDA/SCL 對調 → I2C 全滅）。系統若實際會動，該候選就被排除了。這通常比找
@@ -493,24 +423,3 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 > 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
 > 排名無法定案的對接（`mate:ambiguous`）是候選不是結論；`unclassified` 端點
 > 是**還沒分類**，不是「已確認為負載」。
-
----
-
-## 硬性規則
-
-- **不要憑記憶寫腳位。** 一律 `pinfn` 查原文並標頁碼。
-- **symbol 給名字，datasheet 給行為。** `[S]` 可以說「這支腳叫 `EN`」，不能
-  說「拉高會致能」——名字暗示的行為仍然是行為。
-- **階層不是連通。** `.DSN` 說誰在哪個子電路，`.asc` 說誰接到誰，不可互換。
-- **不要把控制關係當成訊號路徑。** latch/reset/select 進 hint，不進 trace。
-- **不要讓單向元件雙向走。** `direction` 必須來自 datasheet。
-- **不要用腳數推封裝。** netlist 只有已接腳。封裝由電源腳接法等證據排名判定。
-- **推論出來的封裝一律標 `[?]`。** 它不是查證過的事實。
-- **BOM 缺席就是未貼件**，除非該類零件不在該 BOM 的涵蓋範圍內（SMT BOM 的連接器/機構件）。
-- **排名無法定案的對接不要講成已確認。** 排名定案的（`inferred`）可以用，但標 `[?]`。
-- **不要預先大量建模。** 要預先投資就投資在補 datasheet。
-- **不要為了「看起來完整」而省略證據表。** 沒標記的主張等於自承未查證。
-- **不要用檔名猜配對**（netlist↔BOM、料號↔datasheet）。用內容。
-- **不要在文件裡混用事實與推論。** 推論一律標 ⚠️ 並寫清楚定案方式。
-- **檔名含 CJK 相容表意字時**，Bash 會處理不了，改用 PowerShell 或 Glob/Read。
-- **Windows 上 Python 讀不到 Git Bash 的 `/c/...` 路徑**，要用 `C:/...`。

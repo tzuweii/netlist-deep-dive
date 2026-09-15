@@ -25,8 +25,8 @@
 
 共用選項：--config <ndd.json>（預設沿目前目錄往上找）、--board <key>|all
 
-⚠️ CJK 輸出在 cp950 終端機會亂碼，前面加 PYTHONIOENCODING=utf-8。
 ⚠️ Windows 上請用 C:/... 形式路徑；Git Bash 的 /c/... Python 讀不到。
+（CJK 輸出的編碼由 _utf8_stdio() 處理，不必加 PYTHONIOENCODING。）
 """
 from __future__ import print_function
 

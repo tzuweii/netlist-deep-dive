@@ -124,7 +124,7 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 ```bash
 cd .claude/skills/netlist-deep-dive/scripts
 
-PYTHONIOENCODING=utf-8 python ndd.py init "C:/path/to/analysis"
+python ndd.py init "C:/path/to/analysis"
 
 # 人工補完 ndd.json（bom_scope、mates、endpoints…），然後：
 python ndd.py export        # pinmap_<board>.csv：逐腳事實表
