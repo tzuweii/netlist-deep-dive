@@ -171,21 +171,8 @@ symbol 的腳位名是照 datasheet 建的，所以**名字**可信，可直接�
 
 ## Phase 0 — 收檔案、建專案（`init` 一次跑完）
 
-### ⚠️ 資料夾裡已有 `ndd.json` 就走 `migrate`，不要跑 `init`
-
-`init` 會覆蓋設定檔——手寫的斷言、命名規則、對接關係全部消失。工具會擋下來
-並指向 `migrate`，但**不要靠工具擋**：看到 `ndd.json` 就該直接用 `migrate`。
-
-```bash
-python scripts/ndd.py version "<分析資料夾>"      # 哪一版建的、缺什麼
-python scripts/ndd.py migrate "<分析資料夾>" --run
-```
-
-**被要求「更新 skill 並升級某個資料夾」時，照 `UPGRADING.md` 做** —— 那份流程
-版本無關，每一版都適用。版本專屬的事（該版需要的新輸入檔、`migrate` 對不上時
-的處置）在 `CHANGELOG.md` 各版的「升級」小節。
-
----
+> 資料夾裡已有 `ndd.json` = 已建過專案，**不要跑 `init`**（工具會擋）。
+> 升級既有專案照 `UPGRADING.md` 做。
 
 1. 每塊板**三份**：`.DSN` + `.asc` + BOM，丟進同一個資料夾。**缺任何一份就先問，
    不要開始。** 三份都是使用者主動提供的——工具不會去找、不會去猜、也不會少一份
