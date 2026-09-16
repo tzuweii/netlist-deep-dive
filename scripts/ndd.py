@@ -870,6 +870,10 @@ def cmd_init(args):
             [head] + ["        - " + x for x in syms["conflict_lines"][:10]]))
     todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載與穿越件"
                 "逐一填進 `ndd.json` 的 `endpoints`")
+    todo.append("- [ ] **分類未辨識的零件** —— 跑 `ndd.py coverage`，看表尾的"
+                "「需你確認」清單。那多半是**公司自製件**（自訂 footprint、"
+                "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
+                "`footprint_class` / `part_class` 補一行即可（可用裸前綴整批適用）")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/MISSING.md`")
     todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
     todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
@@ -2178,8 +2182,11 @@ def cmd_coverage(args, pj):
     if unknown:
         print("")
         print("== 分類未辨識，需你確認（%d 種）==" % len(unknown))
-        print("   CIS 查不到、前綴也不是通用寫法。**工具不猜**——在 ndd.json 的")
-        print("   `part_class` 補一行即可（key 可用料號或裸前綴，整批適用）。")
+        print("   CIS 查不到、footprint 與 refdes 前綴也都不是通用寫法。")
+        print("   **這多半是公司自製件**（自訂 footprint、專案代號、客戶代號）——")
+        print("   工具**不猜**，請人工在 ndd.json 補一行：")
+        print("     footprint_class：key 是 footprint 樣式（前兩段或首段）")
+        print("     part_class     ：key 是 <board>:<refdes> / 料號 / 裸 refdes 前綴")
         for kk, u in sorted(unknown.items(), key=lambda x: -x[1]["n"])[:30]:
             print("   %-34s x%-4d 例：%s" % (kk[:34], u["n"], " ".join(u["eg"])))
     print("")

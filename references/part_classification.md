@@ -44,7 +44,7 @@ CIS 快照是內部資料，不能隨 skill 散布；footprint **就在 `.asc` �
 
 **從真實專案的 footprint 逐條比對 CIS 分類學出來的**——1161 顆、零衝突。
 準確度來自那次對照，不是從 EDA 詞彙表挑字。字面剛好都是通用功能詞
-（`ADC`、`BPF`、`Ferrite`、`OPTOISO`…），所以能出貨而不透露料號、客戶或
+（`ADC`、`ADC`、`BPF`、`HPF`、`Ferrite`、`OPTOISO`…），所以能出貨而不透露料號、客戶或
 頻段，那是另一件事。
 
 ### 刻意排除的（即使資料上「學得出來」）
@@ -58,9 +58,23 @@ CIS 快照是內部資料，不能隨 skill 散布；footprint **就在 `.asc` �
 
 這幾條改走專案本地的 `footprint_class`／`part_class`，不進 repo。
 
-⚠️ **footprint 是繪圖慣例，不是權威。** 選錯 footprint 就分類錯，而且沒有
-症狀；CIS 綁的是實際採購的料。所以 footprint 推出來的一律標 `[?]`，要定案
-仍須查 CIS 或 datasheet。
+⚠️ **footprint 推出來的一律標 `[?]`**（它是繪圖慣例，不是採購紀錄；CIS 綁的
+才是實際買進來的料）。但**工具預設公司的 footprint 命名是對的**，不會去質疑
+它——否則每顆都要人工複核，這個機制就失去意義。
+
+## 未辨識的多半是自製件——**請人工補，工具不猜**
+
+實測剩下的未辨識全是公司自製／專案專屬的東西：屏蔽罩（專案代號開頭）、
+熱敏電阻（自訂 footprint）、天線（客戶代號開頭）。這類東西沒有通用命名可循，
+**猜出來的分類比空白更糟**，所以工具只列清單、不推測。
+
+`init` 跑完會在 `SETUP.md` 的待辦列出這一項，`coverage` 表尾與 `REVIEW.md`
+的 B7 也各列一次。補法：
+
+```json
+"footprint_class": { "PROJ01": "mechanical" },
+"part_class":      { "ME": "mechanical" }
+```
 
 ⚠️ **`source` 一定要跟著分類一起帶出去**（用 `INFERRED_SRC` 判斷）。CIS 命中
 是 `[B]` 等級的事實，樣式推出來的是 `[?]`。混為一談等於把推論洗成事實，而且
