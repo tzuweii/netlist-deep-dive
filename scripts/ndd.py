@@ -53,6 +53,7 @@ from ndd_pads import Netlist, refkey                               # noqa: E402
 import ndd_confidence as C                                         # noqa: E402
 import ndd_graph                                                   # noqa: E402
 import ndd_pinfn                                                   # noqa: E402
+import ndd_classify                                                 # noqa: E402
 
 CONFIG_NAME = "ndd.json"
 SKILL_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -158,8 +159,7 @@ def pn_of(bom, refdes):
 # ------------------------------------------------------------------- 子命令 --
 # ------------------------------------------------------------------- init --
 def _is_connector(nl, refdes):
-    fp = (nl.parts.get(refdes) or "").lower()
-    return fp.startswith("conn") or bool(re.match(r"^J\d", refdes))
+    return ndd_classify.is_connector(nl, refdes)
 
 
 def _scan(d):
@@ -1067,7 +1067,200 @@ def cmd_audit(args, pj):
     return run_audit(pj.cfg, pj.all_boards(args.board), pj.models)
 
 
+# endpoint_kind -> 工程語言。⚠️ 回答裡不該出現底線、冒號組成的識別碼。
+# 起點掛在超過這個腳數的網路上就警告——幾乎一定是沒被 power_net_regex 收到的軌。
+_RAIL_PINS = 24
+
+_EP_GLOSS = {
+    ndd_graph.EP_UNCLASSIFIED:
+        "還沒分類——可能是終點，也可能是還沒建模的穿越件（覆蓋率缺口，不是路徑有疑問）",
+    ndd_graph.EP_TERMINAL: "已宣告的終端負載",
+    ndd_graph.EP_STATEFUL: "已宣告的狀態端點（訊號不從這裡穿過去）",
+    ndd_graph.EP_DRIVER: "這是訊號來源，不是負載",
+    ndd_graph.EP_UNKNOWN_DECLARED: "停在這裡，不繼續猜",
+    ndd_graph.EP_UNKNOWN_UNUSABLE: "停在這裡，不繼續猜",
+    ndd_graph.EP_BOUNDARY: "到這裡就是跨板對接，預設不繼續走（要跨板加 --follow-mates）",
+}
+
+
+def _adhoc_starts(fab, board, spec, include_power):
+    """把 --from 解析成起點清單。REFDES / REFDES.PIN / net:NAME 三種。"""
+    nl = fab.nl[board]
+    if spec.lower().startswith("net:"):
+        pat = spec[4:]
+        names = [pat] if pat in nl.nets else nl.find_net(pat)
+        if not names:
+            raise SystemExit("找不到符合 '%s' 的 net。" % pat)
+        if len(names) > 1:
+            raise SystemExit(
+                "'%s' 對到 %d 條 net，請指明是哪一條（不替你挑）：\n  %s"
+                % (pat, len(names), "\n  ".join(names[:20])))
+        pins = sorted(nl.net(names[0]), key=lambda x: refkey(x[0]))
+        if not pins:
+            raise SystemExit("net '%s' 上沒有任何腳位。" % names[0])
+        return [(board, pins[0][0], pins[0][1])]
+
+    rd, _, pin = spec.partition(".")
+    if rd not in nl.parts:
+        raise SystemExit("板 '%s' 上沒有 '%s'。" % (board, rd))
+    pins = nl.pins(rd)
+    if pin:
+        if pin not in pins:
+            raise SystemExit(
+                "%s 沒有 pin %s。已接的腳：%s"
+                % (rd, pin, " ".join(list(pins)[:30])))
+        return [(board, rd, pin)]
+    out = []
+    for p, net in pins.items():
+        if not net:
+            continue
+        if not include_power and fab.is_power(net):
+            continue
+        out.append((board, rd, p))
+    if not out:
+        raise SystemExit(
+            "%s 沒有非電源腳可追（要含電源腳請加 --include-power）。" % rd)
+    return out          # nl.pins() 已照腳位順序排好
+
+
+def _rail_candidates(fab, board, top=12):
+    """列出「看起來是電源軌、但 `power_net_regex` 沒收到」的 net。
+
+    ⚠️ **只列候選，不替使用者改設定。** 軌的命名是各專案自己的，而誤判一條軌
+       的代價是訊號路徑無聲消失——那個判斷要人來做。工具能做的是把清單連同
+       腳數攤出來，讓那個判斷變成「確認一張表」而不是「憑記憶想命名慣例」。
+
+    地不在這張表裡：`cls()` 認得 `AGND`/`PGND`，`is_power()` 已經直接吃了。
+    """
+    nl = fab.nl[board]
+    cand = []
+    for n, pins in nl.nets.items():
+        if fab.is_power(n):
+            continue
+        c = ndd_graph.Fabric.cls(n)
+        if c and c.startswith("PWR"):
+            cand.append((len(pins), n, c))
+    if not cand:
+        print("      （沒有明顯的漏網電源軌候選——可能要看 net_normalize 或別的成因）")
+        return cand
+    cand.sort(reverse=True)
+    print("      這塊板上**看起來是電源軌、但設定沒收到**的 net（依腳數）：")
+    for npin, n, c in cand[:top]:
+        print("        %-28s %4d 支腳   %s" % (n[:28], npin, c))
+    if len(cand) > top:
+        print("        ... 另有 %d 條" % (len(cand) - top))
+    print("      確認哪些真的是軌之後，補進 ndd.json 的 power_net_regex 再重追。")
+    print("      ⚠️ `_CS`（電流偵測）、`_FB`（回授）、`_EN`、`_PG` 是**訊號**，"
+          "不要收進去。")
+    return cand
+
+
+def cmd_trace_adhoc(args, pj):
+    """板內隨選追蹤：任一腳位/net 出發，把**走得到的都列出來**。
+
+    與批次 `trace` 的差別：不需要 `mates`／`slot_pattern`，不寫檔。
+    每個 leaf 各印一行 —— 一條分支停住不影響其他分支，這是刻意的。
+    """
+    if args.board not in pj.board_keys("all"):
+        raise SystemExit("沒有這塊板：'%s'。可用的：%s"
+                         % (args.board, " ".join(pj.board_keys("all"))))
+    fab = pj.fabric()
+    stay_on = None if args.follow_mates else args.board
+    hiers = {k: pj.hier(k) for k in pj.board_keys("all")}
+    starts = _adhoc_starts(fab, args.board, args.from_, args.include_power)
+    rows = []
+    for st in starts:
+        nl = fab.nl[st[0]]
+        snet = nl.pin_net(st[1], st[2]) or ""
+        ends = fab.trace(st, max_depth=args.max_depth, stay_on=stay_on)
+        print("")
+        print("%s.%s  net %s" % (st[1], st[2], snet or "(未命名)"))
+        # ⚠️ 起點若掛在一條大網路上，追出來的不是「這條訊號去哪」而是整塊板。
+        #    這幾乎一定代表 power_net_regex 沒收到這條電源/參考網路（坑 #7）。
+        wide = len(nl.net(snet)) if snet else 0
+        if wide >= _RAIL_PINS and not fab.is_power(snet):
+            print("   ⚠️ '%s' 上掛了 %d 支腳，卻**沒有**被判為電源。"
+                  % (snet, wide))
+            print("      追跡會穿過每顆 2-pin 被動件走遍全板，結果不是訊號路徑。")
+            _rail_candidates(fab, st[0])
+        if not ends:
+            print("   （沒有可走的邊——這支腳在本板上沒有下一跳）")
+            rows.append(dict(start="%s.%s" % (st[1], st[2]), signal=snet,
+                             end="", hops="", endpoint_kind="", reason="",
+                             gating="", caveats="", confidence=C.UNKNOWN))
+            continue
+        srows = []
+        for node, (path, ep) in sorted(ends.items()):
+            eb, erd, epin = node
+            kind, reason, ecav = ep if ep else ("", "", [])
+            cav = fab.path_caveats(path, ecav)
+            h = hiers.get(eb)                 # ⚠️ 用該節點自己的板，不是 args.board
+            srows.append(dict(
+                start="%s.%s" % (st[1], st[2]), signal=snet,
+                end=("%s %s.%s" % (eb, erd, epin) if eb != st[0]
+                     else "%s.%s" % (erd, epin)),
+                hops=fab.hop_string(path), endpoint_kind=kind, reason=reason,
+                block=(h.block_of(erd) if h else ""),
+                pin_name=(h.pin_names().get((erd, epin), "") if h else ""),
+                gating=fab.path_gating(path), caveats=C.render(cav),
+                confidence=C.confidence_of(cav)))
+        rows.extend(srows)
+        # 太多就先給輪廓。全部攤開沒有資訊量，也蓋掉真正要看的東西。
+        if len(srows) > args.limit and not args.all:
+            _adhoc_summary(srows, args.limit)
+            continue
+        for r in srows:
+            _adhoc_print(r)
+    print("")
+    print("共 %d 條分支（每條各自成立，一條停住不影響其他條）。" % len(rows))
+    return rows
+
+
+def _adhoc_print(r):
+    print("   -> %s%s%s"
+          % (r["end"], ("（%s）" % r["pin_name"]) if r["pin_name"] else "",
+             ("  @ %s" % r["block"]) if r["block"] else ""))
+    if r["hops"]:
+        print("      經過  : %s" % r["hops"])
+    kind = r["endpoint_kind"]
+    gloss = _EP_GLOSS.get(kind, kind)
+    if kind == ndd_graph.EP_BOUNDARY:
+        gloss = "%s %s" % (gloss, r["reason"])
+    elif r["reason"] and kind in (ndd_graph.EP_UNKNOWN_DECLARED,
+                                  ndd_graph.EP_UNKNOWN_UNUSABLE):
+        gloss = "%s（%s）" % (gloss, r["reason"])
+    print("      狀態  : %s" % gloss)
+    if r["gating"] == C.CONDITIONAL:
+        print("      這條路要**選通**才通")
+    elif r["gating"] == C.UNKNOWN:
+        print("      致能腳由誰驅動不明，**通不通沒把握**")
+    if r["caveats"]:
+        print("      保留  : %s" % r["caveats"])
+
+
+def _adhoc_summary(srows, limit):
+    """落點太多時給輪廓：按端點種類與子電路分佈，不逐條攤。"""
+    kinds, blocks = {}, {}
+    for r in srows:
+        k = r["endpoint_kind"]
+        kinds[k] = kinds.get(k, 0) + 1
+        b = r["block"] or "(頂層)"
+        blocks[b] = blocks.get(b, 0) + 1
+    print("   落點 %d 個——太多，先給輪廓（要全部列出加 --all）：" % len(srows))
+    for k, n in sorted(kinds.items(), key=lambda x: -x[1]):
+        print("      %-5d %s" % (n, _EP_GLOSS.get(k, k)))
+    top = sorted(blocks.items(), key=lambda x: -x[1])[:8]
+    print("      分佈  : %s" % "  ".join("%s×%d" % (b, n) for b, n in top))
+    print("      前 %d 個落點：" % min(limit, len(srows)))
+    for r in srows[:limit]:
+        print("        %s%s%s" % (r["end"],
+                                  ("（%s）" % r["pin_name"]) if r["pin_name"] else "",
+                                  ("  @ %s" % r["block"]) if r["block"] else ""))
+
+
 def cmd_trace(args, pj):
+    if getattr(args, "board", None) and getattr(args, "from_", None):
+        return cmd_trace_adhoc(args, pj)
     tcfg = pj.cfg.get("trace") or {}
     starts = tcfg.get("start") or []
     fab = pj.fabric()
@@ -1806,6 +1999,10 @@ def cmd_manifest(args, pj):
             add("design", os.path.join(pj.dir, b["dsn"]))
     add("config", pj.path)
     add("models", os.path.join(pj.dir, "models.json"))
+    # CIS 分類快照決定「哪些零件要查 datasheet」，換一份就換一組結論。
+    _cisrel = pj.cfg.get("cis_snapshot", "export/cis_parts.csv")
+    if _cisrel:
+        add("cis", os.path.join(pj.dir, _cisrel))
     ddir = os.path.join(pj.dir,
                         (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
     if os.path.isdir(ddir):
@@ -1848,6 +2045,12 @@ def _ds_present(pn, have):
     return bool(key) and any(key in h for h in have)
 
 
+def _cis_index(pj):
+    """CIS 分類快照。沒設定或檔案不在就是空的——它是加速器不是前提。"""
+    rel = pj.cfg.get("cis_snapshot", "export/cis_parts.csv")
+    return ndd_classify.CisIndex(os.path.join(pj.dir, rel) if rel else None)
+
+
 def cmd_coverage(args, pj):
     """per-MPN 的三源覆蓋狀況。**不做無人維護的 per-pin 矩陣。**"""
     _cp, cache, _mig = ndd_pinfn.load_cache(pj.dir)
@@ -1862,18 +2065,39 @@ def cmd_coverage(args, pj):
             for f in os.listdir(ddir)] if os.path.isdir(ddir) else []
     eps = pj.cfg.get("endpoints") or {}
     part_pkg = pj.cfg.get("part_package") or {}
+    taxo = pj.cfg.get("part_class") or {}
+    cis = _cis_index(pj)
+    pwr = re.compile(pj.cfg.get("power_net_regex") or r"^(GND|VCC|VDD)", re.I)
 
-    agg = {}
+    agg, unknown, src_tally = {}, {}, {}
     for k in pj.board_keys(args.board):
         nl, bom = pj.load(k)
         for rd in nl.actives():
             pn = bom.pn(rd)
             amb = is_ambiguous(pn)
             pn = "" if amb else (pn or "")
+            # ⚠️ 查表一定要用 bom.pn() 的原始料號，不能用 pn_of()——後者回傳
+            #    「料號 | 值」的顯示字串，拿去查表會大量假性未命中（實測命中
+            #    率 93.6% -> 59.7%），而且看起來只像「CIS 涵蓋不足」。
+            cat, src = ndd_classify.classify(rd, pn, k, taxo, cis)
+            src_tally[src] = src_tally.get(src, 0) + 1
+            if cat == ndd_classify.UNRECOGNIZED:
+                u = unknown.setdefault(pn or ndd_classify.prefix_of(rd),
+                                       {"n": 0, "eg": []})
+                u["n"] += 1
+                if len(u["eg"]) < 3:
+                    u["eg"].append("%s:%s" % (k, rd))
             key = pn or "(無 MPN)"
             e = agg.setdefault(key, {"n": 0, "bom": "無", "scope": set(),
-                                     "state": set(), "todo": set()})
+                                     "state": set(), "todo": set(),
+                                     "cats": set(), "srcs": set(), "sig": 0})
+            # ⚠️ 同一個 key 底下分類不一致時**不可沿用第一顆**。`(無 MPN)` 這種
+            #    bucket 本來就混雜，宣稱單一分類等於憑第一顆瞎猜整群。
+            e["cats"].add(cat)
+            e["srcs"].add(src)
             e["n"] += 1
+            e["sig"] += sum(1 for _p, net in nl.pins(rd).items()
+                            if net and not pwr.match(net))
             e["scope"].add(bom.scope)   # 同一料號可能跨多塊板，scope 不同
             if amb:
                 e["bom"] = "ambiguity"
@@ -1904,25 +2128,62 @@ def cmd_coverage(args, pj):
                 # ⚠️ 未宣告的穿越件會落在這裡。這是**預設值，不是結論**。
                 e["state"].add("unclassified")
                 e["todo"].add("endpoint 分類")
-            if not _ds_present(pn, have):
+            # 機構件、連接器、線材不需要 datasheet；它們的 BOM 缺口照樣要看得到。
+            if ndd_classify.signal_relevant(cat) and not _ds_present(pn, have):
                 e["todo"].add("datasheet")
 
-    hdr = ("%-28s %4s %-10s %-9s %-4s %-6s %-22s %s"
-           % ("MPN", "顆", "BOM", "scope", "DS", "pinfn", "狀態", "待處理"))
+    hdr = ("%-26s %4s %-16s %-3s %-8s %-4s %-5s %-20s %s"
+           % ("MPN", "顆", "分類", "腳", "BOM", "DS", "pinfn", "狀態", "待處理"))
     print(hdr)
-    print("-" * 120)
-    for pn in sorted(agg):
+    print("-" * 126)
+    # 先排要查證的類別，再按「接了幾條非電源訊號」——這就是該先看哪顆的順序。
+    def shown_cat(e):
+        """多於一種就講「混合」，不挑一個。"""
+        return "混合(%d)" % len(e["cats"]) if len(e["cats"]) > 1             else (list(e["cats"])[0] if e["cats"] else ndd_classify.UNRECOGNIZED)
+
+    def relevant(e):
+        # 混合時只要有一種要查證就當要查證——漏查比多列一顆貴。
+        return any(ndd_classify.signal_relevant(c) for c in e["cats"])
+
+    def order(pn):
         e = agg[pn]
-        print("%-28s %4d %-10s %-9s %-4s %-6d %-22s %s"
-              % (pn[:28], e["n"], e["bom"], ",".join(sorted(e["scope"])),
+        return (0 if relevant(e) else 1, -e["sig"], pn)
+    for pn in sorted(agg, key=order):
+        e = agg[pn]
+        srcs = e["srcs"]
+        mark = ("!!" if ndd_classify.SRC_NONE in srcs else
+                "[?]" if ndd_classify.SRC_PREFIX in srcs else
+                "(宣告)" if srcs == {ndd_classify.SRC_OVERRIDE} else "")
+        print("%-26s %4d %-16s %-3d %-8s %-4s %-5d %-20s %s"
+              % (pn[:26], e["n"], (shown_cat(e) + mark)[:16], e["sig"], e["bom"],
                  "有" if _ds_present(pn, have) else "無",
                  locked.get(pn.upper(), 0),
-                 ",".join(sorted(e["state"]))[:22],
+                 ",".join(sorted(e["state"]))[:20],
                  ", ".join(sorted(e["todo"])) or "-"))
+    tot = sum(src_tally.values()) or 1
+    print("")
+    print("分類來源：CIS 查表 %d (%.1f%%)．人工宣告 %d．refdes 前綴推論 %d [?]．"
+          "未辨識 %d"
+          % (src_tally.get(ndd_classify.SRC_CIS, 0),
+             100.0 * src_tally.get(ndd_classify.SRC_CIS, 0) / tot,
+             src_tally.get(ndd_classify.SRC_OVERRIDE, 0),
+             src_tally.get(ndd_classify.SRC_PREFIX, 0),
+             src_tally.get(ndd_classify.SRC_NONE, 0)))
+    if not cis or not len(cis):
+        print("  （沒有 CIS 快照——分類全靠 refdes 前綴推論，那是推論不是事實。"
+              "見 references/part_classification.md）")
+    if unknown:
+        print("")
+        print("== 分類未辨識，需你確認（%d 種）==" % len(unknown))
+        print("   CIS 查不到、前綴也不是通用寫法。**工具不猜**——在 ndd.json 的")
+        print("   `part_class` 補一行即可（key 可用料號或裸前綴，整批適用）。")
+        for kk, u in sorted(unknown.items(), key=lambda x: -x[1]["n"])[:30]:
+            print("   %-34s x%-4d 例：%s" % (kk[:34], u["n"], " ".join(u["eg"])))
     print("")
     print("注：pinfn 欄只計 **package-locked** 的快取列；未鎖定的不算覆蓋")
     print("    （否則等於把未解決的歧義洗成綠格）。")
     print("    `unclassified` 是預設值，不是結論 —— 未宣告的穿越件會落在這裡。")
+    print("    分類標 [?] 的是從 refdes 前綴**推**的，不是查到的；標 !! 的還沒分類。")
     return agg
 
 
@@ -1950,6 +2211,8 @@ def cmd_blockers(args, pj):
     fab = pj.fabric()
     boards = pj.all_boards("all")
     eps = pj.cfg.get("endpoints") or {}
+    taxo = pj.cfg.get("part_class") or {}
+    cis = _cis_index(pj)
     stat = {}
     for r in rows:
         for tag in (r.get("loads") or "").split():
@@ -1963,7 +2226,13 @@ def cmd_blockers(args, pj):
                 pn = pn if isinstance(pn, str) and pn else "(無 MPN)"
                 others = sum(1 for q, net in nl.pins(rd).items()
                              if q != pin and net and not fab.is_power(net))
-                e = stat.setdefault(pn, {"chains": 0, "parts": set(), "others": 0})
+                cat, csrc = ndd_classify.classify(
+                    rd, bom.pn(rd) or "", k, taxo, cis)
+                e = stat.setdefault(pn, {"chains": 0, "parts": set(),
+                                         "others": 0, "cats": set(),
+                                         "srcs": set()})
+                e["cats"].add(cat)
+                e["srcs"].add(csrc)
                 e["chains"] += 1
                 e["parts"].add("%s.%s" % (k, rd))
                 e["others"] = max(e["others"], others)
@@ -1983,8 +2252,14 @@ def cmd_blockers(args, pj):
     print("-" * 96)
     for pn, e in sorted(stat.items(), key=lambda x: -x[1]["chains"]):
         declared = eps.get(pn)
+        cats = e.get("cats") or set()
         if declared:
             tip = "已宣告 %s" % declared
+        elif ndd_classify.UNRECOGNIZED in cats:
+            # ⚠️ 分類都還沒定，投報率排名對它沒有意義。
+            tip = "**分類未辨識 —— 先確認分類，不要用投報率排它**"
+        elif cats and not any(ndd_classify.signal_relevant(c) for c in cats):
+            tip = "分類為 %s，通常不需要建模" % "/".join(sorted(cats))
         elif e["others"] >= 2:
             tip = "**很可能是穿越件 —— 優先建模**"
         elif e["others"] == 0:
@@ -2062,6 +2337,14 @@ REVIEW_TMPL = u"""# 人工複驗清單
 `unclassified` 是預設值，不是結論。未宣告的穿越件會被當成負載列出。
 
 - [ ] 跑 `ndd.py coverage`，把 `unclassified` 逐一歸類到 `endpoints`。
+
+### B7. 分類未辨識的零件
+CIS 查不到、refdes 前綴也不是通用寫法的，工具**不猜**，一律列進 coverage 的
+「需你確認」段。標 `[?]` 的分類是從前綴**推**的，不是查到的。
+
+- [ ] 跑 `ndd.py coverage`，看表尾的未辨識清單與分類來源比例。
+- [ ] 未辨識的在 `ndd.json` 的 `part_class` 補一行（料號或裸前綴都可以）。
+- [ ] 標 `[?]` 的分類，有沒有哪一顆其實推錯了？
 
 ### B6. 文件裡的因果推論
 斷言只驗得到「數值與連線」。凡是「為什麼這樣設計」之類的推論，**工具一律驗不到**。
@@ -2272,8 +2555,9 @@ def _utf8_stdio():
             pass
 
 
-def main(argv=None):
-    _utf8_stdio()
+def build_parser():
+    """建參數器。獨立出來是為了讓測試能拿到子命令的**回傳值**，
+    而不是只能從 stdout 反推。"""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config")
@@ -2297,7 +2581,19 @@ def main(argv=None):
     p = sub.add_parser("export"); p.set_defaults(func=cmd_export)
     p = sub.add_parser("audit"); p.set_defaults(func=cmd_audit)
     p = sub.add_parser("mate"); p.set_defaults(func=cmd_mate)
-    p = sub.add_parser("trace"); p.add_argument("--signal"); p.set_defaults(func=cmd_trace)
+    p = sub.add_parser("trace"); p.add_argument("--signal")
+    p.add_argument("--board", help="板內隨選追蹤：要追哪一塊板")
+    p.add_argument("--from", dest="from_", metavar="REFDES[.PIN]|net:NAME",
+                   help="板內隨選追蹤的起點")
+    p.add_argument("--max-depth", type=int, default=16, dest="max_depth")
+    p.add_argument("--follow-mates", action="store_true", dest="follow_mates",
+                   help="允許跨板（預設停在對接邊界）")
+    p.add_argument("--include-power", action="store_true", dest="include_power",
+                   help="連電源腳也當起點（預設略過）")
+    p.add_argument("--limit", type=int, default=25,
+                   help="單一起點落點超過幾個就只給輪廓（預設 25）")
+    p.add_argument("--all", action="store_true", help="不給輪廓，全部列出")
+    p.set_defaults(func=cmd_trace)
     p = sub.add_parser("datasheets"); p.add_argument("--pn"); p.add_argument("--url"); p.add_argument("--no-download", action="store_true"); p.set_defaults(func=cmd_datasheets)
     p = sub.add_parser("review"); p.set_defaults(func=cmd_review)
     p = sub.add_parser("pinfn"); p.add_argument("part", nargs="?"); p.add_argument("pin", nargs="?"); p.add_argument("--file"); p.add_argument("--refdes"); p.add_argument("--package"); p.add_argument("--pick", type=int); p.add_argument("--list", action="store_true"); p.add_argument("--import-symbols", action="store_true", dest="import_symbols", help="把 .DSN 的 symbol 腳位功能名匯入快取"); p.set_defaults(func=cmd_pinfn)
@@ -2319,7 +2615,12 @@ def main(argv=None):
     p.add_argument("--no-hier", action="store_true", dest="no_hier",
                    help="不要轉換 .DSN（這台機器沒有 Capture，或只想重跑流程）")
     p.set_defaults(func=cmd_migrate, noproj=True)
+    return ap
 
+
+def main(argv=None):
+    _utf8_stdio()
+    ap = build_parser()
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
         ap.print_help()

@@ -199,9 +199,17 @@ RF 移相器的訊號**永遠通過**，控制位元改變的是相位。標成 
 | `driver(model)` | 反向走到 transfer 邊的輸出端 | **否**，那是訊號來源不是負載 |
 | `unknown_stop(declared)` | 人工宣告「可能穿越但沒建模」 | **否**，停在具名位置 |
 | `unknown_stop(model_unusable)` | 有模型但無法使用 | **否**，附原因碼 |
+| `boundary(not_followed)` | 板內追蹤走到跨板對接 | **否**，還沒走，不是落點 |
 | `unclassified` | **預設** | 是 |
 
 原因碼：`package_unresolved`、`package_conflict`、`model_ambiguous`、`pin_absent`。
+
+`boundary(not_followed)` 只在 `trace --board`（板內追蹤）出現。它標在**本板
+這一側**的腳位上，對面腳位只寫進 reason 字串當證據——對面的節點不進 path。
+這不是潔癖：對面節點一旦進了 path，`path_caveats` 會把對接的 `mate:ambiguous`
+算進**沒有跨板**的板內結論，階層加註還會拿對面的 refdes 去查本板的表，而
+`U1`、`J2` 這種 refdes 每塊板都有——查到的是**別塊板的**功能名，不是查不到。
+邊界那一列本身**要**背對接的 caveat（它宣稱了對面是哪支腳）。
 
 ⚠️ `unclassified` **必須**留在輸出裡。若把未宣告的一律排除，絕大多數真實終端
 負載會在被宣告前全部消失，trace 的主要產出就報廢了。

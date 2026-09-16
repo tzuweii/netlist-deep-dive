@@ -44,7 +44,12 @@ EP_UNCLASSIFIED = "unclassified"
 # ⚠️ 驅動端：走到某顆的 transfer 輸出腳、且無法再往前走。這是訊號的**來源**
 #    不是負載。有向模型才分得出來——對稱模型會直接穿過去，看不到這件事。
 EP_DRIVER = "driver(model)"
-# 進 loads 的端點種類：unknown_stop 是「停在具名位置」、driver 是來源，都不算。
+# ⚠️ 板內追蹤的跨板邊界：**本板這一側**的腳位，對面腳位只當字串證據帶著。
+#    對面的節點不進 path——否則對面的 mate caveats 會污染板內結論的
+#    confidence，階層加註也會拿對面的 refdes 去查本板的表而查到**錯的**。
+EP_BOUNDARY = "boundary(not_followed)"
+# 進 loads 的端點種類：unknown_stop 是「停在具名位置」、driver 是來源，
+# boundary 是「還沒走」，都不算。
 EP_IN_LOADS = (EP_TERMINAL, EP_STATEFUL, EP_UNCLASSIFIED)
 
 class MateMapError(Exception):
@@ -214,7 +219,32 @@ class Fabric(object):
 
     # ---- 工具 -------------------------------------------------------------
     def is_power(self, net):
-        return bool(net and self.power_rx and self.power_rx.match(net))
+        """這條 net 要不要在追跡時跳過。
+
+        兩個來源，**故意只取其中一半的 `cls()`**：
+
+        - 使用者的 `power_net_regex` —— 電源軌歸這裡管。軌的命名是各專案
+          自己的（`6V_R`、`3P4V_P`、`28V_A`），而**誤判一條軌的代價是訊號
+          路徑無聲消失**，所以那個判斷留給人。
+        - `cls(net) == "GND"` —— 地歸這裡管。「`AGND`／`PGND`／`28V_GND_PM_2`
+          是地」是 EDA 通用慣例不是專案私有規則，`cls` 從 v1.8.0 就認得了，
+          而地永遠不是訊號路徑，判它不需要任何專案知識。
+
+        ⚠️ **不可以直接用 `cls(net) != "SIG"`。** `cls` 會把 `6V_CS_PM_2`
+           （電流偵測）、`3P4V_FB_PM_2`（回授）判成 `PWR:*`——那些其實是
+           訊號腳，整個接過去等於把它們的路徑安靜地砍掉。`cls` 的
+           `_RX_CTRL` 只擋 `EN`/`PG`，沒擋 `CS`/`FB`。
+
+        ⚠️ **`cls` 是先判地、再判控制訊號**，所以 `GND_SENSE`、`PGND_FB`、
+           `GND_EN` 會被它回成 `GND`。那些是 Kelvin 偵測回授一類的**訊號**，
+           在 power 板上是正常設計。自動判地時要先把它們排掉——自動判錯的
+           代價是路徑無聲消失，而使用者正則仍可覆蓋回來（人講的最大）。
+        """
+        if not net:
+            return False
+        if self.power_rx and self.power_rx.match(net):
+            return True
+        return self.cls(net) == "GND" and not self._RX_SENSE.search(net.upper())
 
     def norm(self, n):
         if n is None:
@@ -228,6 +258,11 @@ class Fabric(object):
     # `TX_PGA_LOAD` 不可以因為含有 `PG` 就被當成 power-good。
     _RX_GND = re.compile(r"(^|_)[A-Z]*GND[A-Z0-9]*(_|$)")
     _RX_CTRL = re.compile(r"(^|_)(EN|PG|PGOOD|PWRGD|POK)(_|$)")
+    # 名字裡帶這些 token 的，**不自動當成地**（`GND_SENSE`、`PGND_FB` 是
+    # Kelvin 偵測回授一類的訊號，在 power 板上是正常設計）。只擋自動判定，
+    # 使用者的 power_net_regex 仍然可以把它判成電源。
+    _RX_SENSE = re.compile(r"(^|_)(SENSE|SNS|FB|CS|EN|PG|PGOOD|PWRGD|POK|"
+                           r"DET|ALERT|MON)(_|\d|$)")
     _RX_RAIL = re.compile(r"(^|_)(-?\d+P\d+V|-?\d+V\d+|-?\d+V)(_|$)")
 
     @staticmethod
@@ -529,11 +564,16 @@ class Fabric(object):
         # `endpoint_kind` 欄呈現，待辦由 coverage / REVIEW.md 列出。
         return EP_UNCLASSIFIED, "undeclared", []
 
-    def trace(self, start, stop_fn=None, max_depth=16):
+    def trace(self, start, stop_fn=None, max_depth=16, stay_on=None):
         """BFS。caveats 與 gating 沿路徑累積 —— 標記不傳遞等於沒標。
 
         `stop_fn` 給定時用它判斷終點（例如「走到中繼連接器就停」）；否則用
         endpoint 分類。回傳 {node: (path, endpoint or None)}。
+
+        `stay_on` 給板名時＝**板內追蹤**：走到別塊板的邊**在產生的當下就擋**，
+        邊界記在本板這一側的節點上（`EP_BOUNDARY`），對面腳位只寫進 reason
+        字串。對面的節點不進 `seen`、不進 path，所以對面的 caveats/gating
+        不會污染板內結論，階層加註也不會拿對面的 refdes 去查本板的表。
         """
         seen = {start: None}
         q = deque([(start, 0)])
@@ -543,6 +583,17 @@ class Fabric(object):
             if d >= max_depth:
                 continue
             for nxt, why, cav, gating in self.neighbours(node):
+                if stay_on is not None and nxt[0] != stay_on:
+                    # ⚠️ 一定要顯式記這個 leaf。連接器腳位在 endpoint_of 會因
+                    #    mate_partners 為真而提早回傳 None，只擋邊不補記的話，
+                    #    這支腳會從輸出裡**無聲消失**。
+                    # 邊界那一列**自己**要背這條 mate 的 caveat——它宣稱了
+                    # 對面是哪支腳，對映不確定時這個宣稱就不確定。其他板內
+                    # 落點不受影響：那條 mate 邊從沒進過它們的 path。
+                    ends.setdefault(node, (self._path(seen, node),
+                                           (EP_BOUNDARY,
+                                            "-> %s %s.%s" % nxt, list(cav))))
+                    continue
                 if nxt in seen:
                     continue
                 seen[nxt] = (node, why, cav, gating)

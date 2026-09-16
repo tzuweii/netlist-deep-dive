@@ -31,6 +31,7 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 | `references/models.md` | **要建模型或追訊號前一定要讀。** transfer/control/endpoint 的分界 |
 | `references/verification.md` | **Phase 4 一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
 | `references/datasheets.md` | 需要 datasheet 時讀 |
+| `references/part_classification.md` | 看 `coverage` 的分類、或要補 `part_class` 時讀 |
 
 工具在 `scripts/`，進入點是 `ndd.py`。回歸測試：
 `python -m unittest discover -s tests`，改動工具後一定要跑。
@@ -136,6 +137,8 @@ symbol 的腳位名是照 datasheet 建的，所以**名字**可信，可直接�
 | `gating: unknown` | 「致能腳懸空／由誰驅動不明，**通不通我沒把握**」 |
 | `endpoint_kind: unclassified` | 「訊號停在這裡，但這幾顆**還沒分類**——可能是終點，也可能是還沒建模的穿越件」。**這是覆蓋率缺口，不是路徑有疑問**，別講成路徑不可信 |
 | `driver(model)` | 「這是訊號**來源**，不是負載」 |
+| `unknown_stop(*)` | 「**停在這裡，不再往下猜**」（講出停在哪顆的哪支腳，那是有用的答案） |
+| `boundary(not_followed)` | 「到這裡就是**跨板對接**，板內追蹤預設不走過去」（並講出對面是哪支腳） |
 | `mate:ambiguous` | 「這個接頭的腳位對應，我從 netlist **判不出來**」 |
 | `mate:inferred` / `package:inferred` | 「這是我**推的**，依據是⋯」（寫出依據，別寫狀態名） |
 | `confidence: *` | **不寫欄位名**——改成一句話講最弱的那個環節 |
@@ -163,6 +166,7 @@ symbol 的腳位名是照 datasheet 建的，所以**名字**可信，可直接�
 | `verified-pins.csv` | **datasheet 原文快取** + symbol 腳位名 | `pinfn` 自動累積；symbol 列由 `init` 整批重建 |
 | `hier/*_parts.csv` / `hier/*_nodes.csv` | **可重生的衍生物**（`.DSN` 轉出） | `init` 產生；`.DSN` 更新就重跑 |
 | `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
+| `export/cis_parts.csv` | **選用加速器**（料件分類快照），不是前提 | 使用者自行從 CIS 唯讀匯出；入 `MANIFEST.md` |
 | `MANIFEST.md` | 輸入檔指紋 | 寫文件時 |
 
 **原始來源是資產，結論是拋棄式的。**
@@ -250,10 +254,40 @@ python scripts/ndd.py coverage    # per-MPN 三源覆蓋，看缺口在哪
 python scripts/ndd.py part <關鍵字>
 ```
 
+### 板內追蹤（最常用的查詢）
+
+```bash
+python ndd.py trace --board <板> --from U939          # 該顆所有非電源腳
+python ndd.py trace --board <板> --from U939.15       # 只追這一支
+python ndd.py trace --board <板> --from net:PLL_REF   # 從一條 net 出發
+python ndd.py trace --board <板> --from J4 --follow-mates   # 允許跨板
+```
+
+**不需要 `mates` / `slot_pattern` 設好就能用**——這是它跟批次 `trace` 的差別。
+不寫檔，結果直接印出來。
+
+每個落點各印一行：**一條分支停在未建模的元件上，不影響其他分支**。走到跨板
+對接時預設停在**本板這一側**並講出對面是哪支腳，不會替你走過去。
+
+⚠️ **落點爆量（幾百上千個）幾乎一定是電源軌沒被判為電源**，於是追跡穿過每顆
+2-pin 被動件走遍全板。**地不會有這個問題**——`AGND`／`PGND`／`28V_GND_PM_2`
+由 `cls()` 直接認得，不必設定。**軌要你設 `power_net_regex`**：軌的命名是各專案
+自己的，而誤判一條軌會讓訊號路徑**無聲消失**，所以工具只把候選連同腳數列出來
+給你確認，不替你決定。
+
+⚠️ **`_CS`（電流偵測）、`_FB`（回授）、`_EN`、`_PG` 是訊號，不要收進電源正則。**
+`GND_SENSE`、`PGND_FB` 這種 Kelvin 偵測地也是訊號，工具不會自動把它當地。
+
 先看數量結構：某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映。
 **先找出倍率，再解釋它。**
 
 `coverage` 的 `unclassified` 欄是**預設值不是結論**——未宣告的穿越件會落在那裡。
+
+`coverage` 依**零件分類**排序：要查證的（IC、RF、分立半導體、晶振⋯）排前面並
+按「接了幾條非電源訊號」排序，機構件／連接器／線材沉底且不排 datasheet 待辦。
+分類以公司料件庫（CIS）的料號查表為準，查不到才退回 refdes 前綴**推論**（標
+`[?]`），再查不到就列進「需你確認」——**工具不猜**。設定與大類對照見
+`references/part_classification.md`。
 
 ## Phase 2 — 取得 datasheet
 

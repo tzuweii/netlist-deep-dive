@@ -97,6 +97,26 @@
     "board_a:U9": "unknown_stop"
   },
 
+  "cis_snapshot": "export/cis_parts.csv",
+
+  "part_class": {
+    "_說明": [
+      "**惰性**例外表，隨用隨長，不是 init 後的必填清單。",
+      "分類順位：這張表 > CIS 快照（料號查表）> refdes 前綴推論 > 未辨識。",
+      "key 可以是 `<board>:<refdes>`、料號、或裸前綴（整批適用）。",
+      "值：ic / semiconductor_discrete / rf / filter / crystal / sensor /",
+      "    switch / relay / transformer / isolator / optoelectronic /",
+      "    power_module / circuit_protection / passive / connector / cable /",
+      "    test_point / mechanical / fiducial / pcb / battery / dev_board /",
+      "    instrument / placeholder（刻意保留的未貼位置）",
+      "只影響「要不要查 datasheet、排序排哪裡」，不影響連通與追跡。",
+      "大類對照，以及為什麼不把 ME/FUSE/OPEN 寫死進工具：見 part_classification.md"
+    ],
+    "OPEN": "placeholder",
+    "ME": "mechanical",
+    "board_a:A12": "mechanical"
+  },
+
   "power_net_regex": "^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\\d+V\\d+.*)$",
   "_power_net_regex_說明": [
     "走圖時排除電源網路，否則整張圖連成一團。",
