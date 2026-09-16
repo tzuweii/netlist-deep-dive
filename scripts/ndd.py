@@ -868,8 +868,10 @@ def cmd_init(args):
                 "為準：") % len(syms["conflict_lines"])
         todo.append("\n".join(
             [head] + ["        - " + x for x in syms["conflict_lines"][:10]]))
-    todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載與穿越件"
-                "逐一填進 `ndd.json` 的 `endpoints`")
+    todo.append("- [ ] **端點分類（選用，不必逐一填）** —— `unclassified` 是"
+                "**預設值不是缺陷**：追跡停在沒建模的零件上是正確行為，路徑本身"
+                "由 netlist 完整支持。只有當你想知道「訊號到這裡之後還會不會"
+                "繼續走」時才值得宣告，跑 `ndd.py blockers` 看哪幾顆最值得處理")
     todo.append("- [ ] **分類未辨識的零件** —— 跑 `ndd.py coverage`，看表尾的"
                 "「需你確認」清單。那多半是**公司自製件**（自訂 footprint、"
                 "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
@@ -1937,8 +1939,10 @@ def cmd_migrate(args):
     if stats and stats.get("model_pending"):
         run_todo.append("- [ ] **%d 項封裝待指定** —— 見 audit [1.5] 段"
                         % len(stats["model_pending"]))
-    run_todo.append("- [ ] **未分類端點** —— 跑 `ndd.py coverage`，把終端負載"
-                    "填進 `ndd.json` 的 `endpoints`（不需要 datasheet）")
+    run_todo.append("- [ ] **端點分類（選用，不必逐一填）** —— `unclassified` 是"
+                    "預設值不是缺陷。想知道訊號還會不會繼續走的那幾顆才值得宣告；"
+                    "跑 `ndd.py blockers` 排優先序，確定是終端的填 `endpoints` "
+                    "即可（不需要 datasheet）")
     run_todo.append("- [ ] **舊的 pinfn 快取** —— 標為待重新確認，需要哪支腳就重跑")
     for _k, msg in hier_problems:
         run_todo.append("- [ ] **階層未補上** —— %s" % msg.splitlines()[0])
@@ -2344,10 +2348,17 @@ REVIEW_TMPL = u"""# 人工複驗清單
 
 {pending}
 
-### B5. 未分類端點
-`unclassified` 是預設值，不是結論。未宣告的穿越件會被當成負載列出。
+### B5. 端點分類（選用，不必逐一填）
+`unclassified` 是**預設值，不是缺陷**。追跡停在沒建模的零件上是正確行為——
+路徑本身由 netlist 完整支持，停住的是「這顆之後還會不會繼續走」這個問題。
 
-- [ ] 跑 `ndd.py coverage`，把 `unclassified` 逐一歸類到 `endpoints`。
+⚠️ 但 `n_loads` / `loads` 欄把 `unclassified` 也算進去了，所以那個數字是
+**「訊號抵達的腳位數」**，不是「已確認的負載數」。要區分看同一列的
+`endpoint_kind` 欄。
+
+- [ ] 只有想知道訊號是否繼續延伸的那幾顆才值得宣告 —— 跑 `ndd.py blockers`
+      看哪幾顆擋住最多鏈路，確定是終端的填 `endpoints`（不需要 datasheet），
+      會穿越的才需要建 transfer 模型（要 datasheet）。
 
 ### B7. 分類未辨識的零件
 CIS 查不到、refdes 前綴也不是通用寫法的，工具**不猜**，一律列進 coverage 的
