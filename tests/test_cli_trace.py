@@ -23,7 +23,7 @@ import fixtures                                                # noqa: E402
 import ndd                                                     # noqa: E402
 
 
-def _project(mate_map=None):
+def _project(mate_map=None, hier=False):
     """ecu.J902（起點）-> ecu.J101（slot）<-> fe.J2 -> 負載 U1。"""
     pj = fixtures.Project()
     pj.board("ecu", {"J902": "CONN_P", "J101": "CONN_S"},
@@ -35,7 +35,10 @@ def _project(mate_map=None):
              {"FE_A": [("J2", "1"), ("U1", "1")],
               "FE_B": [("J2", "2"), ("U1", "2")]},
              [{"Part Reference": "J2", "Manufacturer_PN": "CONN_S"},
-              {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"}])
+              {"Part Reference": "U1", "Manufacturer_PN": "ADC_A"}],
+             blocks={"U1": "RX_Chain"} if hier else None,
+             pin_names={("J2", "1"): "CH1_OUT", ("U1", "1"): "AIN0"}
+                       if hier else None)
     pj.cfg["mates"] = [["ecu", "J101", "fe", "J2"]]
     pj.cfg["mate_map"] = mate_map or {}
     pj.cfg["trace"] = {"start": [{"board": "ecu", "conn": "J902", "rail": "P"}],
@@ -95,6 +98,34 @@ class TestTraceCaveatPropagation(unittest.TestCase):
         self.assertIn(("J101.2", "J2.1"), got)
         self.assertNotIn(("J101.1", "J2.1"), got,
                          "沿用同 pin number 等於忽略批准的對映")
+
+
+class TestTraceHierAnnotation(unittest.TestCase):
+    """階層只**加註**：欄位一定要在，內容有階層才填，而且不得改變路徑本身。"""
+
+    def test_columns_exist_and_are_empty_without_hier(self):
+        rows = _run_trace(_project())
+        self.assertTrue(rows)
+        for r in rows:
+            self.assertIn("far_block", r)
+            self.assertEqual(r["far_block"], "")
+            self.assertEqual(r["far_pin_name"], "")
+
+    def test_hier_fills_block_and_pin_name(self):
+        rows = _run_trace(_project(hier=True))
+        by = {r["far_pin"]: r for r in rows}
+        self.assertEqual(by["J2.1"]["far_pin_name"], "CH1_OUT")
+        # 負載分佈把「在頂層」也講出來——省略等於讓讀者以為全部都在某個 block
+        self.assertEqual(by["J2.1"]["load_blocks"], "(頂層) | RX_Chain")
+        self.assertEqual(by["J2.1"]["far_block"], "")      # J2 掛在頂層
+
+    def test_hier_does_not_change_the_path(self):
+        """加註不得動到 BFS 的結果——連通只由 .asc 決定。"""
+        def key(rows):
+            return sorted((r["signal"], r["mid"], r["far_pin"], r["far_net"],
+                           r["loads"], r["stops"]) for r in rows)
+        self.assertEqual(key(_run_trace(_project())),
+                         key(_run_trace(_project(hier=True))))
 
 
 if __name__ == "__main__":

@@ -15,7 +15,7 @@
 
 ```bash
 # 1. 盤點：列出 BOM 裡所有主動元件，看哪些已經有、哪些缺，並嘗試自動下載
-PYTHONIOENCODING=utf-8 python scripts/ndd.py datasheets
+python scripts/ndd.py datasheets
 
 # 2. 對 MISSING.md 裡的料號，用 WebSearch 找官方 datasheet 網址，再指定下載
 python scripts/ndd.py datasheets --pn "PAC1954T-E/4MX" --url "https://..."

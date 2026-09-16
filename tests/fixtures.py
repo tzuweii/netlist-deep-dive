@@ -42,6 +42,99 @@ def write_bom(path, rows, header=None, sheet="BOM"):
     return path
 
 
+# ------------------------------------------------------- 階層 CSV / .DSN --
+HIER_PARTS_COLS = ["id", "parent_id", "depth", "refdes", "base_refdes", "inst_path",
+                   "source_part", "value", "footprint", "is_block",
+                   "netlist_ignore", "hier_path_display"]
+HIER_NODES_COLS = ["net", "is_global", "is_power", "owner_id", "refdes",
+                   "pin_number", "pin_name", "kind", "inst_path_display"]
+
+
+def write_hier(parts_csv, nodes_csv, parts, nets, blocks=None, pin_names=None):
+    """產生與 `write_asc` 一致的兩份階層 CSV。
+
+    `blocks`: {refdes: block_name} —— 把零件掛到某個 block 底下（depth 2）。
+    `pin_names`: {(refdes, pin): 功能名}。
+    """
+    import csv
+    blocks = blocks or {}
+    pin_names = pin_names or {}
+    rows, ids, nid = [], {}, 100
+    for bname in sorted(set(blocks.values())):
+        nid += 1
+        ids[bname] = str(nid)
+        rows.append(dict(id=str(nid), parent_id="0", depth="1", refdes=bname,
+                         base_refdes="", inst_path=bname, source_part="",
+                         value="", footprint="", is_block="1",
+                         netlist_ignore="0", hier_path_display=bname))
+    for rd, fp in parts.items():
+        nid += 1
+        ids[rd] = str(nid)
+        blk = blocks.get(rd)
+        ipath = "%s/%s" % (blk, rd) if blk else rd
+        rows.append(dict(id=str(nid), parent_id=ids[blk] if blk else "0",
+                         depth="2" if blk else "1", refdes=rd, base_refdes=rd,
+                         inst_path=ipath, source_part=fp, value="", footprint=fp,
+                         is_block="0", netlist_ignore="0",
+                         hier_path_display=ipath))
+    with io.open(parts_csv, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, HIER_PARTS_COLS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(rows)
+
+    nrows = []
+    for net, conns in nets.items():
+        for rd, pin in conns:
+            nrows.append(dict(net=net, is_global="0", is_power="0",
+                              owner_id=ids.get(rd, ""), refdes=rd,
+                              pin_number=pin,
+                              pin_name=pin_names.get((rd, pin), pin),
+                              kind="pin", inst_path_display="%s/%s" % (rd, pin)))
+    with io.open(nodes_csv, "w", encoding="utf-8", newline="") as fh:
+        w = csv.DictWriter(fh, HIER_NODES_COLS, lineterminator="\n")
+        w.writeheader()
+        w.writerows(nrows)
+    return parts_csv, nodes_csv
+
+
+def stub_convert(mapping):
+    """把 `ndd_hier.convert` 換成查表，讓 init 測試不需要 Cadence。
+
+    `mapping`: {.DSN 絕對路徑: (parts_csv, nodes_csv)}。回傳還原用的 callable。
+
+    ⚠️ **stub 必須複製真實 `convert()` 的落地行為**：輸出寫進 `outdir`，
+       檔名是 `<DSN stem>_parts.csv` / `_nodes.csv`。早期的版本直接回傳
+       fixture 的原路徑，於是 `ndd.json` 指向 `hier/`、檔案卻在別的地方——
+       測試全綠，但 init 跑完根本讀不到階層。**stub 與被換掉的東西行為不同
+       時，通過的測試證明的是 stub 能跑，不是程式能跑。**
+    """
+    import shutil
+    import ndd_hier
+    real_convert, real_find = ndd_hier.convert, ndd_hier.find_cadence
+
+    def fake(dsn, outdir, tclsh=None, timeout=None, echo=None):
+        key = os.path.abspath(dsn)
+        if key not in mapping:
+            raise ndd_hier.HierError("stub 未涵蓋：%s" % dsn)
+        src_p, src_n = mapping[key]
+        if not os.path.isdir(outdir):
+            os.makedirs(outdir)
+        stem = os.path.splitext(os.path.basename(dsn))[0]
+        dst_p = os.path.join(outdir, "%s_parts.csv" % stem)
+        dst_n = os.path.join(outdir, "%s_nodes.csv" % stem)
+        shutil.copyfile(src_p, dst_p)
+        shutil.copyfile(src_n, dst_n)
+        return dst_p, dst_n
+
+    ndd_hier.convert = fake
+    ndd_hier.find_cadence = lambda hint=None: ("<stub-tclsh>", "<stub-root>")
+
+    def restore():
+        ndd_hier.convert = real_convert
+        ndd_hier.find_cadence = real_find
+    return restore
+
+
 # ---------------------------------------------------------------- 專案骨架 --
 class Project(object):
     """建一個臨時分析資料夾，含 .asc / BOM / ndd.json。"""
@@ -63,15 +156,30 @@ class Project(object):
             "datasheets": {"dir": "datasheets", "parts": []},
         }
 
-    def board(self, key, parts, nets, bom_rows, bom_scope="complete", label=None):
+    def board(self, key, parts, nets, bom_rows, bom_scope="complete", label=None,
+              blocks=None, pin_names=None):
+        """`blocks` / `pin_names` 任一有給，就一併產出階層 CSV 並寫進設定。
+
+        ⚠️ 兩者都不給時**不寫任何階層鍵** —— 「沒有階層」必須是測得到的狀態，
+           否則 `Project.hier()` 回 None 的那條路永遠沒被跑過。
+        """
         asc = "%s.asc" % key
         bom = "%s.xlsx" % key
         write_asc(os.path.join(self.dir, asc), parts, nets)
         write_bom(os.path.join(self.dir, bom), bom_rows)
-        self.cfg["boards"][key] = {
-            "label": label or key, "asc": asc, "bom": bom,
-            "bom_scope": bom_scope, "ref_col": None,
-        }
+        cfg = {"label": label or key, "asc": asc, "bom": bom,
+               "bom_scope": bom_scope, "ref_col": None}
+        if blocks or pin_names:
+            hd = os.path.join(self.dir, "hier")
+            if not os.path.isdir(hd):
+                os.makedirs(hd)
+            write_hier(os.path.join(hd, "%s_parts.csv" % key),
+                       os.path.join(hd, "%s_nodes.csv" % key),
+                       parts, nets, blocks=blocks, pin_names=pin_names)
+            cfg["dsn"] = "%s.DSN" % key
+            cfg["hier_parts"] = "hier/%s_parts.csv" % key
+            cfg["hier_nodes"] = "hier/%s_nodes.csv" % key
+        self.cfg["boards"][key] = cfg
         return self
 
     def models(self, models):

@@ -16,7 +16,16 @@
       "  smt_only  只涵蓋 SMT 件 -> 連接器/測試點/鎖孔/手插件的缺席不可判定，",
       "            但 SMT 件的缺席照樣是 DNI",
       "  variant / unknown  BOM 身分的註記，判讀等同 complete",
-      "舊欄位 `bom_kind` 已改名為 `bom_scope`，載入舊檔會給明確錯誤。"
+      "舊欄位 `bom_kind` 已改名為 `bom_scope`，載入舊檔會給明確錯誤。",
+      "",
+      "v2.0 起每塊板還要一份 `.DSN`（OrCAD Capture 設計檔）：",
+      "  dsn          原始設計檔檔名，由 init 用 refdes 交集配對，不用檔名猜",
+      "  hier_parts   轉出的零件／階層 CSV（**衍生物**，刪掉重跑 init 就有）",
+      "  hier_nodes   轉出的節點／腳位功能名 CSV（同上）",
+      "兩個路徑一律寫正斜線——ndd.json 會跟著專案在不同機器間移動。",
+      "⚠️ 這三個欄位缺任何一個，該板就沒有階層：`pins` 不顯示子電路位置與",
+      "   功能名，pinmap 的 hier_path / pin_name 欄是空的。其餘一切照舊可用",
+      "   ——階層是**加註**，接線永遠以 .asc 為準。"
     ],
     "board_a": {
       "label": "Board A",
@@ -25,7 +34,10 @@
       "bom_scope": "complete",
       "sheet": null,
       "ref_col": null,
-      "expand_ranges": false
+      "expand_ranges": false,
+      "dsn": "board_a.DSN",
+      "hier_parts": "hier/board_a_parts.csv",
+      "hier_nodes": "hier/board_a_nodes.csv"
     },
     "board_b": {
       "label": "Board B",
@@ -34,7 +46,10 @@
       "bom_scope": "smt_only",
       "sheet": null,
       "ref_col": null,
-      "expand_ranges": false
+      "expand_ranges": false,
+      "dsn": "board_b.DSN",
+      "hier_parts": "hier/board_b_parts.csv",
+      "hier_nodes": "hier/board_b_nodes.csv"
     }
   },
 
