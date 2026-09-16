@@ -222,5 +222,76 @@ class TestCoverageIntegration(unittest.TestCase):
                          "沒有快照就退回前綴推論，而且要標成推論")
 
 
+class TestFootprintLayer(unittest.TestCase):
+    """footprint 比 refdes 前綴準得多，而且資料本來就在 .asc 裡。"""
+
+    def test_two_segments_beat_one(self):
+        self.assertEqual(K.footprint_class("PMIC-DCDC_XYZ"), "power_module")
+        self.assertEqual(K.footprint_class("PMIC-LDO_XYZ"), "ic")
+        self.assertEqual(K.footprint_class("D-TVS_SMBJ"), "circuit_protection")
+        self.assertEqual(K.footprint_class("D-LED_0603"), "optoelectronic")
+
+    def test_first_segment_fallback(self):
+        for fp, cat in (("ADC_PARTNO", "ic"), ("Conn_SMP", "connector"),
+                        ("OSC_ECS", "crystal"), ("Ferrite_0603", "filter"),
+                        ("Open_0402", "placeholder"), ("RF_Mixer", "rf")):
+            self.assertEqual(K.footprint_class(fp), cat, fp)
+
+    def test_footprint_beats_refdes_prefix(self):
+        """refdes 只說得出「這是 IC」，footprint 說得出「這是濾波器」。"""
+        cat, src = K.classify("U7", "", "b", {}, None, "BPF_ABF-8R075G")
+        self.assertEqual((cat, src), ("filter", K.SRC_FOOTPRINT))
+
+    def test_cis_beats_footprint(self):
+        pj = fixtures.Project()
+        cat, src = K.classify("U1", "ADC_A", "b", {}, _cis(pj.dir), "Conn_X")
+        self.assertEqual((cat, src), ("ic", K.SRC_CIS))
+
+    def test_footprint_is_marked_as_inference(self):
+        """CIS 命中是事實，footprint 是推論——不可混用。"""
+        self.assertIn(K.SRC_FOOTPRINT, K.INFERRED_SRC)
+        self.assertIn(K.SRC_PREFIX, K.INFERRED_SRC)
+        self.assertNotIn(K.SRC_CIS, K.INFERRED_SRC)
+
+    def test_package_names_are_not_rules(self):
+        """QFN 是封裝不是功能；`R` 是電阻前綴。那批資料學得出來不代表就能出貨。"""
+        for fp in ("QFN-16", "QFN_32", "R-1Kohm", "SOT23", "BGA_676"):
+            self.assertIsNone(K.footprint_class(fp), fp)
+
+    def test_project_local_override(self):
+        ov = {"PROJ01": "mechanical", "CUST-A": "pcb"}
+        self.assertEqual(K.footprint_class("PROJ01_T1_SHIELD", ov),
+                         "mechanical")
+        self.assertEqual(K.footprint_class("CUST-A-110018", ov), "pcb")
+
+    def test_unknown_footprint_falls_through(self):
+        self.assertIsNone(K.footprint_class("Widget_9000"))
+        self.assertIsNone(K.footprint_class(""))
+        self.assertIsNone(K.footprint_class(None))
+
+
+class TestPlaceholderTokenBoundary(unittest.TestCase):
+    """實測抳到的：`NC` 前綴比對沒要求完整 token。"""
+
+    def test_real_parts_starting_with_nc_are_not_placeholders(self):
+        for pn in ("NCR2-123+", "NCS2-23+", "NCP1117", "NC7SZ125"):
+            cat, _ = K.classify("U1", pn, "b", {}, None)
+            self.assertNotEqual(cat, "placeholder",
+                                "%s 是真零件，不是預留位置" % pn)
+
+    def test_real_placeholders_still_match(self):
+        for pn in ("OPEN_0402", "NC_0402", "DNP-0402", "DNI 0201", "OPEN"):
+            cat, _ = K.classify("R1", pn, "b", {}, None)
+            self.assertEqual(cat, "placeholder", pn)
+
+    def test_no_separator_form_is_left_to_the_footprint_rule(self):
+        """`OPEN0402` 刻意不比對——放行數字會讓 `NC7SZ125` 又中招。"""
+        self.assertNotEqual(K.classify("R1", "OPEN0402", "b", {}, None)[0],
+                            "placeholder")
+        self.assertEqual(
+            K.classify("R1", "OPEN0402", "b", {}, None, "Open_0402")[0],
+            "placeholder")
+
+
 if __name__ == "__main__":
     unittest.main()

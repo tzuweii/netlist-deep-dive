@@ -2066,6 +2066,7 @@ def cmd_coverage(args, pj):
     eps = pj.cfg.get("endpoints") or {}
     part_pkg = pj.cfg.get("part_package") or {}
     taxo = pj.cfg.get("part_class") or {}
+    fpov = pj.cfg.get("footprint_class") or {}
     cis = _cis_index(pj)
     pwr = re.compile(pj.cfg.get("power_net_regex") or r"^(GND|VCC|VDD)", re.I)
 
@@ -2079,7 +2080,8 @@ def cmd_coverage(args, pj):
             # ⚠️ 查表一定要用 bom.pn() 的原始料號，不能用 pn_of()——後者回傳
             #    「料號 | 值」的顯示字串，拿去查表會大量假性未命中（實測命中
             #    率 93.6% -> 59.7%），而且看起來只像「CIS 涵蓋不足」。
-            cat, src = ndd_classify.classify(rd, pn, k, taxo, cis)
+            cat, src = ndd_classify.classify(
+                rd, pn, k, taxo, cis, nl.parts.get(rd), fpov)
             src_tally[src] = src_tally.get(src, 0) + 1
             if cat == ndd_classify.UNRECOGNIZED:
                 u = unknown.setdefault(pn or ndd_classify.prefix_of(rd),
@@ -2152,7 +2154,7 @@ def cmd_coverage(args, pj):
         e = agg[pn]
         srcs = e["srcs"]
         mark = ("!!" if ndd_classify.SRC_NONE in srcs else
-                "[?]" if ndd_classify.SRC_PREFIX in srcs else
+                "[?]" if srcs & set(ndd_classify.INFERRED_SRC) else
                 "(宣告)" if srcs == {ndd_classify.SRC_OVERRIDE} else "")
         print("%-26s %4d %-16s %-3d %-8s %-4s %-5d %-20s %s"
               % (pn[:26], e["n"], (shown_cat(e) + mark)[:16], e["sig"], e["bom"],
@@ -2162,11 +2164,12 @@ def cmd_coverage(args, pj):
                  ", ".join(sorted(e["todo"])) or "-"))
     tot = sum(src_tally.values()) or 1
     print("")
-    print("分類來源：CIS 查表 %d (%.1f%%)．人工宣告 %d．refdes 前綴推論 %d [?]．"
-          "未辨識 %d"
+    print("分類來源：CIS 查表 %d (%.1f%%)．人工宣告 %d．"
+          "footprint 推論 %d [?]．refdes 前綴推論 %d [?]．未辨識 %d"
           % (src_tally.get(ndd_classify.SRC_CIS, 0),
              100.0 * src_tally.get(ndd_classify.SRC_CIS, 0) / tot,
              src_tally.get(ndd_classify.SRC_OVERRIDE, 0),
+             src_tally.get(ndd_classify.SRC_FOOTPRINT, 0),
              src_tally.get(ndd_classify.SRC_PREFIX, 0),
              src_tally.get(ndd_classify.SRC_NONE, 0)))
     if not cis or not len(cis):
@@ -2227,7 +2230,8 @@ def cmd_blockers(args, pj):
                 others = sum(1 for q, net in nl.pins(rd).items()
                              if q != pin and net and not fab.is_power(net))
                 cat, csrc = ndd_classify.classify(
-                    rd, bom.pn(rd) or "", k, taxo, cis)
+                    rd, bom.pn(rd) or "", k, taxo, cis,
+                    nl.parts.get(rd), pj.cfg.get("footprint_class") or {})
                 e = stat.setdefault(pn, {"chains": 0, "parts": set(),
                                          "others": 0, "cats": set(),
                                          "srcs": set()})

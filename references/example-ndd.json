@@ -117,6 +117,17 @@
     "board_a:A12": "mechanical"
   },
 
+  "footprint_class": {
+    "_說明": [
+      "footprint 樣式 -> 分類的**惰性**例外表。前兩段優先（`PMIC-LDO`），",
+      "找不到才退回首段（`ADC`）。工具內建一張通用表，這裡只補你專案",
+      "特有的（專案代號、客戶名、自訂縮寫）——那些不適合進共用的表。",
+      "⚠️ footprint 是繪圖慣例不是權威，推出來的一律標 [?]。"
+    ],
+    "PROJ01": "mechanical",
+    "R-1Kohm": "sensor"
+  },
+
   "power_net_regex": "^(?!.*_(EN|PG)$)(GND|.*VDD.*|.*VCC.*|.*_\\d+V\\d+.*)$",
   "_power_net_regex_說明": [
     "走圖時排除電源網路，否則整張圖連成一團。",

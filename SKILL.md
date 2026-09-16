@@ -285,8 +285,11 @@ python ndd.py trace --board <板> --from J4 --follow-mates   # 允許跨板
 
 `coverage` 依**零件分類**排序：要查證的（IC、RF、分立半導體、晶振⋯）排前面並
 按「接了幾條非電源訊號」排序，機構件／連接器／線材沉底且不排 datasheet 待辦。
-分類以公司料件庫（CIS）的料號查表為準，查不到才退回 refdes 前綴**推論**（標
-`[?]`），再查不到就列進「需你確認」——**工具不猜**。設定與大類對照見
+分類順位：人工宣告 > CIS 料號查表（**事實**）> footprint 樣式 > refdes 前綴
+（後兩者是**推論**，標 `[?]`）> 未辨識（列進「需你確認」，**工具不猜**）。
+
+主力是 **footprint**——它就在 `.asc` 裡，不需要 CIS 也不會過期。實測六塊板：
+沒有 CIS 快照時涵蓋 96.9%、未辨識只剩 1.7%。詳見
 `references/part_classification.md`。
 
 ## Phase 2 — 取得 datasheet
