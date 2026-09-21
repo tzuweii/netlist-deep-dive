@@ -828,6 +828,8 @@ def cmd_init(args):
                          lambda: cmd_blockers(A(), pj), results)
     _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
+    _run_step("architecture —— 各板導覽（第 0 版）",
+              lambda: cmd_architecture(A(), pj), results)
 
     # ---- SETUP.md ----
     pairing = "\n".join(
@@ -877,6 +879,9 @@ def cmd_init(args):
                 "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
                 "`footprint_class` / `part_class` 補一行即可（可用裸前綴整批適用）")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/MISSING.md`")
+    todo.append("- [ ] **把 `<板>_Architecture.md` 加深** —— `init` 已經寫好"
+                "第 0 版（只含不需要規格書的事實），把它的 §8「還不知道什麼」"
+                "一條條消掉；**腳本永遠寫不出「為什麼這樣設計」**")
     todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
     todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
                 "要聚焦某條鏈請填入")
@@ -904,9 +909,10 @@ def cmd_init(args):
         fh.write(txt)
     print("\n" + "=" * 78)
     print("寫出 %s" % sp)
-    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md"
+    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md / "
+          "<板>_Architecture.md"
           "%s" % ("" if args.no_datasheets else " / datasheets/MISSING.md"))
-    print("可以開始問電路問題了。")
+    print("可以開始問電路問題了，或接著把各板的 _Architecture.md 加深。")
 
 
 def cmd_pins(args, pj):
@@ -2416,6 +2422,25 @@ def cmd_review(args, pj):
     print("寫出 %s" % p)
 
 
+def cmd_architecture(args, pj):
+    """各板導覽 `<板>_Architecture.md`——`init` 當下寫得出來的那一半。
+
+    **刻意只含 `[N]`/`[B]`/`[S]`。** 這是設計上的保證不是自律：跑到這一步
+    時 datasheet 才剛盤點完（多半還沒到齊），腳位功能一類的 `[D]` 級主張
+    沒有材料可寫。第 0 版之後由人接手加深。
+    """
+    import ndd_arch
+    ddir = os.path.join(pj.dir,
+                        (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
+    miss = 0
+    mp = os.path.join(ddir, "MISSING.md")
+    if os.path.isfile(mp):
+        with io.open(mp, encoding="utf-8") as fh:
+            miss = sum(1 for ln in fh if ln.startswith("- "))
+    for k in pj.board_keys(args.board):
+        ndd_arch.write(pj, k, missing_pn=miss or None)
+
+
 def _import_symbols(pj):
     """把各板 symbol 腳位功能名匯入 `verified-pins.csv`。
 
@@ -2624,6 +2649,7 @@ def build_parser():
     p.add_argument("--add", nargs="+", metavar="名稱", help="把範例複製進專案（all = 全部）")
     p.add_argument("--force", action="store_true", help="覆蓋同名模型")
     p.set_defaults(func=cmd_models)
+    p = sub.add_parser("architecture"); p.set_defaults(func=cmd_architecture)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)

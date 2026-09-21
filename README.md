@@ -186,6 +186,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `UPGRADING.md` | **升級流程（給 AI 照著做）**，版本無關；附發新版的檢查清單 |
 | `CHANGELOG.md` | 版本紀錄與 v0 對比；每版的「升級」小節寫該版特有的步驟 |
 | `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
+| `references/init.md` | `init` 的完整流程（一個專案只用一次，從 `SKILL.md` 搬出來的） |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |
 | `references/verification.md` | 分層驗證方法，以及**結構上驗不到**的四類 |
