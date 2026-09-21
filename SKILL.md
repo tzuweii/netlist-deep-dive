@@ -23,7 +23,7 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 
 | 檔案 | 什麼時候讀 |
 |---|---|
-| `references/pitfalls.md` | **每次都讀。** 每一條都會產生「看起來合理但是錯的」結論 |
+| `references/pitfalls.md` | **每次都讀。** 答案會怎麼壞掉：6 個輸出觸發器（寫句子時比對）、5 條格式事實、8 條背景認識 |
 | `references/models.md` | **要建模型或追訊號前一定要讀。** transfer/control/endpoint 的分界 |
 | `references/verification.md` | **要驗證跨板對接、或交付前一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
 | `references/datasheets.md` | 需要 datasheet 時讀 |

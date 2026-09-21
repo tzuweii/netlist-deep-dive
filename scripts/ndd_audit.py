@@ -53,7 +53,8 @@ def dni_provable(nl, bom, refdes):
 
 
 def run_assertion(a, nl, bom, models):
-    """回傳 (ok, 實際值字串)。新增 kind 時務必同步更新 references/pitfalls.md。"""
+    """回傳 (ok, 實際值字串)。新增 kind 時務必同步更新 references/verification.md
+    的 kind 對照表。"""
     k = a["kind"]
 
     if k == "count_pn":

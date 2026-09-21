@@ -401,7 +401,7 @@ def _name_gap(fab, ba, ra, bb, rb, limit=5):
     """列出直通對應下兩側名字不同的 net 樣本。
 
     ⚠️ **只報觀察到的差異，不自己發明 `net_normalize` 規則。** 剝錯後綴會讓
-       `CLK_1` 與 `CLK_2` 正規化成同一個，排名反而失去鑑別力（pitfalls #8）。
+       `CLK_1` 與 `CLK_2` 正規化成同一個，排名反而失去鑑別力。
     """
     pa, pb = fab.nl[ba].pins(ra), fab.nl[bb].pins(rb)
     out = []
