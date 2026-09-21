@@ -153,7 +153,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 **日常問答（不必呼叫 skill）** —— 把「三源對照規約」抄進該專案的 `CLAUDE.md`，
 它每個 session 自動載入。
 
-**建立新專案 / 完整分析（呼叫 skill）** —— 走一次 Phase 0–6。
+**建立新專案 / 完整分析（呼叫 skill）** —— 照 `references/project-lifecycle.md` 走一次。
 
 ## 設計原則
 
@@ -185,8 +185,8 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 |---|---|
 | `UPGRADING.md` | **升級流程（給 AI 照著做）**，版本無關；附發新版的檢查清單 |
 | `CHANGELOG.md` | 版本紀錄與 v0 對比；每版的「升級」小節寫該版特有的步驟 |
-| `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
-| `references/init.md` | `init` 的完整流程（一個專案只用一次，從 `SKILL.md` 搬出來的） |
+| `SKILL.md` | 三源對照規約、查詢入口、判讀規則——**回答電路問題時用的那一半** |
+| `references/project-lifecycle.md` | 建檔、補規格書、建模、寫文件、交付——**一個專案大多只執行一次**，從 `SKILL.md` 搬出來的 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |
 | `references/verification.md` | 分層驗證方法，以及**結構上驗不到**的四類 |

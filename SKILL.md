@@ -18,21 +18,17 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 | `.DSN` | **階層**（零件在哪個子電路）與**腳位功能名**（`SENSE3+`、低有效標記） |
 
 `.DSN` 由 `init` 自動透過 Capture 自己的 TCL API **唯讀**轉成兩份 CSV，
-轉完**逐條對帳 `.asc`**：不一致就停下來，不會默默採用。詳見 `pitfalls.md` #13-#16。
-
-⚠️ **這台機器要裝 OrCAD Capture**（`init` 自動偵測 `C:\Cadence\SPB_*`），
-沒有就無法處理 `.DSN`，`init` 會失敗而不是降級。**工具絕不寫入 Cadence 安裝目錄。**
 
 ## 開始前先讀
 
 | 檔案 | 什麼時候讀 |
 |---|---|
 | `references/pitfalls.md` | **每次都讀。** 每一條都會產生「看起來合理但是錯的」結論 |
-| `references/init.md` | **要跑 `init` 前一定要讀**（新的一組檔案、資料夾還沒有 `ndd.json`）。一個專案只用一次 |
 | `references/models.md` | **要建模型或追訊號前一定要讀。** transfer/control/endpoint 的分界 |
-| `references/verification.md` | **Phase 4 一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
+| `references/verification.md` | **要驗證跨板對接、或交付前一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
 | `references/datasheets.md` | 需要 datasheet 時讀 |
 | `references/part_classification.md` | 看 `coverage` 的分類、或要補 `part_class` 時讀 |
+| `references/project-lifecycle.md` | **建檔、補規格書、建模、寫文件、交付時讀。**平常回答電路問題**完全用不到** |
 
 工具在 `scripts/`，進入點是 `ndd.py`。回歸測試：
 `python -m unittest discover -s tests`，改動工具後一定要跑。
@@ -171,48 +167,34 @@ symbol 的腳位名是照 datasheet 建的，所以**名字**可信，可直接�
 - **跨板對接要枚舉排名**，不能只看「兩側相符」。
 - **netlist 描述設計，不描述手上那片板。** rework、飛線、換料都不在裡面。
 
-### 產出物政策（避免累積會腐化的東西）
+### 產出物政策
 
-| 東西 | 定位 | 何時產生 |
-|---|---|---|
-| **回答本身** | **主要交付物** | 每次 |
-| `<板>_Architecture.md` | **板卡導覽**——`init` 寫第 0 版，之後由人加深 | `init` 自動產生 |
-| 其他 md 文件 | 只有使用者明確要求時 | 明確要求 |
-| pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
-| `topology_hint.csv` | 功能說明，**不是連通** | 隨 trace 產生 |
-| `verified-pins.csv` | **datasheet 原文快取** + symbol 腳位名 | `pinfn` 自動累積；symbol 列由 `init` 整批重建 |
-| `hier/*_parts.csv` / `hier/*_nodes.csv` | **可重生的衍生物**（`.DSN` 轉出） | `init` 產生；`.DSN` 更新就重跑 |
-| `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
-| `export/cis_parts.csv` | **選用加速器**（料件分類快照），不是前提 | 使用者自行從 CIS 唯讀匯出；入 `MANIFEST.md` |
-| `MANIFEST.md` | 輸入檔指紋 | 寫文件時 |
+**回答本身是主要交付物。** CSV（`pinmap_*`、`signal_chain`、`topology_hint`）與
+`hier/*.csv` 都是**可重生的衍生物**，需要時重跑、過期就丟；`models.json` 與
+`export/cis_parts.csv` 是**選用加速器不是前提**；`<板>_Architecture.md` 由 `init`
+寫第 0 版、之後由人加深。其他 md 只有使用者明確要求時才產生。
 
 **原始來源是資產，結論是拋棄式的。**
 
+完整的產出物對照表見 `references/project-lifecycle.md`。
+
 ---
 
-## Phase 0 — 建專案（`init`）
+## 查詢入口
 
-> 資料夾裡已有 `ndd.json` = 已建過專案，**不要跑 `init`**（工具會擋）。
-> 升級既有專案照 `UPGRADING.md` 做。
-
-```bash
-python scripts/ndd.py init "C:/path/to/analysis" --plan   # 只讀，不寫檔
-python scripts/ndd.py init "C:/path/to/analysis" --run    # 一路跑完
-```
-
-**完整流程、會中止的條件、init 自動決定與不決定的項目 —— 見
-`references/init.md`**，那裡是權威，本節只是入口。
-
-## Phase 1 — 盤點與初步理解
+**這些是回答電路問題時真正會用到的指令。** 全域參數（`--board`）放在子指令
+**前面**。
 
 ```bash
-python scripts/ndd.py export      # pinmap_<board>.csv：逐腳事實表
-python scripts/ndd.py audit       # 先跑一次
-python scripts/ndd.py coverage    # per-MPN 三源覆蓋，看缺口在哪
-python scripts/ndd.py part <關鍵字>
+python ndd.py --board <板> pins U913          # 某顆的所有腳位 + 階層 + footprint + BOM
+python ndd.py --board <板> net TX_EN_P_0      # 某條 net 上有哪些腳
+python ndd.py part <關鍵字>                    # 料號／refdes 模糊搜尋，跨板
+python ndd.py --board <板> pinfn --refdes U939 15   # 這支腳做什麼（由工具鎖定三源）
+python ndd.py coverage                         # 三源覆蓋與零件分類
+python ndd.py blockers                         # 訊號鏈停在哪些料號上
 ```
 
-### 板內追蹤（最常用的查詢）
+### 板內追蹤（最常用）
 
 ```bash
 python ndd.py trace --board <板> --from U939          # 該顆所有非電源腳
@@ -227,61 +209,34 @@ python ndd.py trace --board <板> --from J4 --follow-mates   # 允許跨板
 每個落點各印一行：**一條分支停在未建模的元件上，不影響其他分支**。走到跨板
 對接時預設停在**本板這一側**並講出對面是哪支腳，不會替你走過去。
 
+---
+
+## 判讀規則
+
+### 電源軌：漏設很吵，多設無聲
+
 ⚠️ **落點爆量（幾百上千個）幾乎一定是電源軌沒被判為電源**，於是追跡穿過每顆
 2-pin 被動件走遍全板。**地不會有這個問題**——`AGND`／`PGND`／`28V_GND_PM_2`
-由 `cls()` 直接認得，不必設定。**軌要你設 `power_net_regex`**：軌的命名是各專案
-自己的，而誤判一條軌會讓訊號路徑**無聲消失**，所以工具只把候選連同腳數列出來
-給你確認，不替你決定。
+由 `cls()` 直接認得，不必設定。**軌要使用者設 `power_net_regex`**：軌的命名是
+各專案自己的，而誤判一條軌會讓訊號路徑**無聲消失**，所以工具只把候選連同腳數
+列出來給人確認，不替他決定。
 
 ⚠️ **`_CS`（電流偵測）、`_FB`（回授）、`_EN`、`_PG` 是訊號，不要收進電源正則。**
 `GND_SENSE`、`PGND_FB` 這種 Kelvin 偵測地也是訊號，工具不會自動把它當地。
 
-先看數量結構：某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映。
-**先找出倍率，再解釋它。**
+### 先找出倍率，再解釋它
 
-`coverage` 的 `unclassified` 欄是**預設值不是結論**——未宣告的穿越件會落在那裡。
+某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映。`init` 產生的
+`<板>_Architecture.md` §2 已經把重複結構整理好了，先看那裡。
 
-`coverage` 依**零件分類**排序：要查證的（IC、RF、分立半導體、晶振⋯）排前面並
-按「接了幾條非電源訊號」排序，機構件／連接器／線材沉底且不排 datasheet 待辦。
-分類順位：人工宣告 > CIS 料號查表（**事實**）> footprint 樣式 > refdes 前綴
-（後兩者是**推論**，標 `[?]`）> 未辨識（列進「需你確認」，**工具不猜**）。
+### 腳位功能：`[S]` 與 `[D]` 在快取裡是兩種列
 
-主力是 **footprint**——它就在 `.asc` 裡，不需要 CIS 也不會過期。實測六塊板：
-沒有 CIS 快照時涵蓋 96.9%、未辨識只剩 1.7%。詳見
-`references/part_classification.md`。
-
-## Phase 2 — 取得 datasheet
-
-```bash
-python scripts/ndd.py datasheets              # 盤點 + 自動下載 + 產出 MISSING.md
-python scripts/ndd.py datasheets --pn <料號> --url <你查到的網址>
-```
-
-自動下載只對少數原廠站有效。流程：自動盤點 → 對 `MISSING.md` 裡的料號用
-**WebSearch** 找官方網址 → `--url` 抓下來 → 自製件／連接器抓不到是正常的。
-
-## Phase 3 — 查證腳位功能
-
-```bash
-python ndd.py pinfn <料號> 8
-python ndd.py --board <板> pinfn --refdes U939 15   # 由工具鎖定三源
-python ndd.py pinfn --list
-python ndd.py pinfn --import-symbols               # 重建 symbol 列（init 已跑過）
-```
-
-`--refdes` 模式會自己從 BOM 取料號、從 netlist 取已接腳位與 footprint，
-**不必靠你記得傳對料號**。
-
-**先查快取，未命中才抽取；抽到的原文自動寫進 `verified-pins.csv`。**
-
-### 快取裡有兩種列，責任不同
-
-| `resolved_by` | 來源 | 有原文？ | 用途 |
+| `resolved_by` | 來源 | 有原文？ | 回答得了什麼 |
 |---|---|---|---|
-| `not_applicable` / `user_confirmed` | datasheet | ✅ 逐字 + 頁碼 + SHA-256 | 回答「這支腳做什麼」 |
-| `capture_symbol` | `.DSN` 的 symbol | ❌ **只有名字** | 回答「這支腳叫什麼」；對 datasheet 抽出來的名字 |
+| `not_applicable` / `user_confirmed` | datasheet | ✅ 逐字 + 頁碼 + SHA-256 | 「這支腳**做什麼**」 |
+| `capture_symbol` | `.DSN` 的 symbol | ❌ **只有名字** | 「這支腳**叫什麼**」 |
 
-symbol 列**不會**讓 datasheet 抽取被跳過——兩者是互相佐證，不是互相取代。
+symbol 列**不會**讓 datasheet 抽取被跳過——兩者互相佐證，不是互相取代。
 `--list` 裡 symbol 列的名字前若有 `~`，代表 symbol 上有上劃線＝**低有效**。
 
 ⚠️ **名字對不上時不要自己挑一個。** `pinfn` 會印出兩邊的名字並要你確認封裝
@@ -290,6 +245,9 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者是互相佐證，�
 
 ⚠️ **同一料號的兩顆零件 symbol 腳位名不一致時，整筆不寫入。** 那代表其中一顆
 用錯 symbol，或 BOM 標錯料號——不可合併，也不可挑一個。
+
+⚠️ **`pinfn` 抽到多筆時不替你挑。** 一份 datasheet 涵蓋多種封裝時會把每筆的
+頁碼、腳位名與腳號欄位攤出來，要 `--pick <n>`，**在那之前不寫快取**。
 
 > **快取原文，永不快取解讀。**
 > 快取的是逐字內容 + 出處（檔名／頁碼／SHA-256／封裝欄），不是「pin1 與 pin3
@@ -304,69 +262,10 @@ layout 的 footprint 名稱 `[N]`。`audit` 的 [1.5] 段會逐顆列出判定�
 
 **推論出來的一律標 `[?]`**，並帶 `package:inferred` caveat 沿路徑傳到 CSV。
 門檻是「零矛盾 + 唯一勝出 + 至少一個獨立來源佐證」，達不到就列入待補，
-**不替你假設**。要定案就填 `ndd.json` 的 `part_package`——但即使你明確宣告，
-若與 netlist 矛盾仍會 FAIL（**人講的最大，但矛盾要講出來**）。
+**不替你假設**。即使使用者明確宣告 `part_package`，與 netlist 矛盾仍會 FAIL
+（**人講的最大，但矛盾要講出來**）。
 
-排名機制與 `pin_roles` 的角色見 `references/models.md`。
-
-### pinfn 抽到多筆時不替你挑
-
-一份 datasheet 涵蓋多種封裝時，`pinfn` 會把每筆的頁碼、腳位名與**腳號欄位**
-攤出來，要你 `--pick <n> [--package <標籤>]`，**在那之前不寫快取**。對照 audit
-的封裝判定即可選定。**抽到一筆才是已證明無歧義**，才會自動寫入快取。
-
-### 元件模型（選用，非前提）
-
-**不要靠記憶判斷哪顆值得建模——用數的：**
-
-```bash
-python ndd.py blockers      # 訊號鏈停在哪些料號上、各擋住幾條
-```
-
-輸出的「其他訊號腳」= 該顆除了訊號停住的那支腳外，還有幾支接在**非電源**網路
-上。數字大代表訊號很可能還會繼續走——這是**只用 netlist** 就能算的穿越件跡象。
-
-**只是終端負載的，填 `ndd.json` 的 `endpoints` 就好**，不需要建模也不需要
-datasheet。
-
-```bash
-python ndd.py models --examples        # 看有哪些範例
-python ndd.py models --add PCA9547     # 複製進專案的 models.json
-```
-
-範例**不會自動載入，要手動複製**——模型是「某人對 datasheet 的解讀」，複製這個
-動作讓它變成**你的宣告**，`audit` / `REVIEW.md` 才會把它列進你要複核的清單。
-範例的 `pin_roles` 多半留空，那要翻 datasheet 才能填，**不要憑印象**。
-
-schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界、`always`
-必須由 netlist 推導 —— 全部見 `references/models.md`。
-
-## Phase 4 — 驗證（先讀 `references/verification.md`）
-
-```bash
-python scripts/ndd.py mate        # 連接器對接：枚舉所有對應方式並排名
-python scripts/ndd.py trace       # 端到端訊號鏈 + topology_hint
-python scripts/ndd.py audit       # 完整稽核
-```
-
-**`mate` 的判讀**：只有「直通唯一勝出且 margin 夠大」才算站得住。margin ≤ 4
-一定要標明證據薄弱。工具也會判斷是「兩側同型 → 中間有線束」還是「公母直接
-對接 → 只剩 footprint 方位」，兩者定案途徑完全不同。
-
-**連接器只負責「訊號有沒有連到」** —— netlist 連得上就是事實，不需要 datasheet。
-所以排名會**自己定案**：
-
-| 狀態 | 條件 | 下游 |
-|---|---|---|
-| `approved` | `ndd.json` 的 `mate_map` 明確批准 | 無 caveat |
-| `inferred` | 直通唯一勝出 + 零矛盾 + margin ≥ 2 | 無 caveat，標 `[?]` |
-| `ambiguous` | 排名決定不了 | `mate:ambiguous`，confidence 降為 unknown |
-
-只有排名真的分不出來時才需要 layout／線束圖／實測。
-
-**殘存候選要用「會不會壞」排除**：代入後看它會不會造成立即而明顯的故障
-（SDA/SCL 對調 → I2C 全滅）。系統若實際會動，該候選就被排除了。這通常比找
-線束圖快，而且是**唯一能同時涵蓋 layout 正確性的證據**。
+### 追跡停在哪，以及為什麼那是對的
 
 ⚠️ **追跡停在沒建模的零件上是正確行為，不是缺陷。** 訊號能不能穿過一顆開關
 取決於致能腳，那不是 netlist 回答得了的事——停在具名位置並講出停在哪，就是
@@ -374,48 +273,37 @@ python scripts/ndd.py audit       # 完整稽核
 被誰驅動（例如 `[1=driven_by:DIO_SEL_0]`）；致能腳實際綁死在電源軌上才會標
 `always`。兩者都沒有謊報連通。
 
-`endpoints` 是**選用**的加註，不必逐一填——只有想知道「訊號到這裡之後還會不會
-繼續走」的那幾顆才值得宣告，用 `blockers` 排優先序。
+`coverage` 的 `unclassified` 欄是**預設值不是結論**——未宣告的穿越件會落在那裡。
+`endpoints` 是**選用**的加註，不必逐一填。
 
-**`trace` 產出兩份，不可互換**：
+### 跨板對接怎麼判讀
 
-- `signal_chain.csv` — 只含已驗證的 `signal_transfer` 邊，可當架構結論
+只有「直通唯一勝出且 margin 夠大」才算站得住。**margin ≤ 4 一定要標明證據薄弱。**
+工具也會判斷是「兩側同型 → 中間有線束」還是「公母直接對接 → 只剩 footprint
+方位」，兩者定案途徑完全不同。
+
+**連接器只負責「訊號有沒有連到」**——netlist 連得上就是事實，不需要 datasheet，
+所以排名會自己定案：
+
+| 狀態 | 條件 | 下游 |
+|---|---|---|
+| `approved` | `ndd.json` 的 `mate_map` 明確批准 | 無 caveat |
+| `inferred` | 直通唯一勝出 + 零矛盾 + margin ≥ 2 | 無 caveat，標 `[?]` |
+| `ambiguous` | 排名決定不了 | `mate:ambiguous`，confidence 降為 unknown |
+
+**殘存候選要用「會不會壞」排除**：代入後看它會不會造成立即而明顯的故障
+（SDA/SCL 對調 → I2C 全滅）。系統若實際會動，該候選就被排除了。這通常比找
+線束圖快，而且是**唯一能同時涵蓋 layout 正確性的證據**。
+
+### `trace` 產出兩份，不可互換
+
+- `signal_chain.csv` — 只含已驗證的 `signal_transfer` 邊，**可當架構結論**
 - `topology_hint.csv` — control／stateful／參數控制／未知邊界，是**功能說明
   不是連通**，永不得當成下一跳
 
-## Phase 5 — 把導覽寫成架構文件
+### 零件分類的順位
 
-**`init` 已經產生 `<板>_Architecture.md` 的第 0 版**——那份只含不需要規格書就
-能斷言的事實（重複結構、主要零件、對外介面、電源、訊號家族、未貼件），並在
-§8 列出它還不知道什麼。**這一階段是把 §8 一條條消掉**，不是從零開始寫。
-
-**md 解釋「為什麼」，CSV 回答「是什麼」，稽核確認兩者一致。** 不要把逐腳資料
-抄進 md。第 0 版刻意不寫任何 `[D]` 級主張（那時 datasheet 還沒到齊），
-**加深的內容要自己帶出處**。
-
-文件開頭必備：
-
-```bash
-python scripts/ndd.py manifest    # 產生 MANIFEST.md
-```
-
-- 引用 manifest（含 `.asc` / BOM / datasheet / **`ndd.json`** 的完整 SHA-256
-  與工具版本）而不是手打版本號——`ndd.json` 裡的 `mate_map`、`part_package`、
-  `net_normalize` 每一項都會改變結論
-- 一句「逐腳查詢請用 CSV / `ndd.py`，不要靠本文」
-- 書寫慣例：**每個 refdes 後面一律附料號**
-
-每寫一條可機械驗證的主張，就在 `ndd.json` 的 `assertions` 補一條。
-寫完跑 `audit`，**首次執行的 FAIL 就是文件的錯**，改文件而不是改斷言。
-
-## Phase 6 — 人工複驗清單
-
-```bash
-python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
-```
-
-**這一步不可省略。** 交付時要明確告訴使用者：
-
-> 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
-> 排名無法定案的對接（`mate:ambiguous`）是候選不是結論；`unclassified` 端點
-> 是**還沒分類**，不是「已確認為負載」。
+人工宣告 > CIS 料號查表（**事實**）> footprint 樣式 > refdes 前綴（後兩者是
+**推論**，標 `[?]`）> 未辨識（列進「需你確認」，**工具不猜**）。主力是
+footprint——它就在 `.asc` 裡，不需要 CIS 也不會過期。實測六塊板涵蓋 96.9%、
+未辨識只剩 1.7%。詳見 `references/part_classification.md`。

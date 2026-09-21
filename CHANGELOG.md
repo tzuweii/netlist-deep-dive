@@ -59,6 +59,37 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v2.2.0 之後（未發布）—— `SKILL.md` 按「用不用得到」重切
+
+`VERSION` 未動：**腳本一個位元組都沒改**，CSV 產出完全相同，`MANIFEST.md` 的
+可重現性不受影響。變的是「每次叫用載入哪些指示」。
+
+這個 skill 的目的是回答**客觀的電路事實**，但 `SKILL.md` 有一半內容是專案
+生命週期（建檔、補規格書、建模、寫文件、交付）——那些**一個專案大多只執行
+一次**，卻每次叫用都整份進 context。
+
+切法的判準只有一條：**使用者問一個電路問題時，這段內容會不會用到。**
+
+| 留在 `SKILL.md` | 搬進 `references/project-lifecycle.md` |
+|---|---|
+| 三源對照規約（147 行，一行不動） | 建檔 `init` 完整流程 |
+| 查詢入口（`pins`/`net`/`part`/`trace`/`pinfn`） | 補 datasheet（WebSearch → `--url`） |
+| 判讀規則（電源軌、倍率、腳位快取、追跡停在哪、跨板對接、分類順位） | 建元件模型（`blockers`、`models --add`） |
+| | 寫架構文件、交付複驗、產出物完整對照表 |
+
+⚠️ **指令可搬，判斷不能搬。** `mate`／`trace`／`audit` 這些指令 `init` 都跑過
+了，但「margin ≤ 4 要標明證據薄弱」「殘存候選用會不會壞排除」「追跡停在沒建模
+的零件是正確行為」是隨時問訊號問題都要用的——這些留在 `SKILL.md`。
+
+**Phase 0–6 的編號拿掉了。** `init --run` 其實已經把 Phase 1–6 的指令全部跑過
+一次，編號看起來像時序、實際上是議題分類，會誤導。改成按用途命名。
+
+`references/init.md` 改名為 `references/project-lifecycle.md`（涵蓋的不只 init）。
+
+`SKILL.md` 421 -> 310 行。常駐量（含標「每次都讀」的 `pitfalls.md`）788 -> 677 行。
+
+---
+
 ## v2.2.0 —— `init` 產出板卡導覽；`init` 流程搬進 reference
 
 ### `<板>_Architecture.md`：`init` 當下就寫得出來的那一半
