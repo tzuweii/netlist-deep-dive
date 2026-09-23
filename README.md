@@ -130,7 +130,7 @@ python ndd.py init "C:/path/to/analysis"
 python ndd.py export        # pinmap_<board>.csv：逐腳事實表
 python ndd.py audit         # 一致性稽核（含 parser 自我驗證、模型檢查）
 python ndd.py coverage      # per-MPN 三源覆蓋，看缺口在哪
-python ndd.py mate          # 連接器對接：枚舉所有對應方式並排名
+python ndd.py mate          # 連接器對接：直通／線束接法判定
 python ndd.py trace         # signal_chain.csv + topology_hint.csv
 python ndd.py pinfn --board a --refdes U939 15   # 由工具鎖定三源查腳位
 python ndd.py datasheets    # 盤點/下載 datasheet
@@ -202,7 +202,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `scripts/ndd_pinfn.py` | datasheet 原文抽取與快取（**不做封裝判定**） |
 | `scripts/ndd_package.py` | 封裝判定：只用 netlist + BOM 的證據排名 |
 | `scripts/ndd_models.py` | 有向 transfer 模型、control 推導 |
-| `scripts/ndd_graph.py` | 對接排名 + 跨板追跡 + hint graph |
+| `scripts/ndd_graph.py` | 對接判定 + 跨板追跡 + hint graph |
 | `scripts/ndd_audit.py` | 宣告式斷言引擎 |
 | `tests/` | 合成 fixture 回歸測試 |
 

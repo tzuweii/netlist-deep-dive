@@ -21,12 +21,11 @@ netlist 本身**沒有跨板連線**。要追一條從 A 板走到 C 板的訊�
 
   * **netlist 證明「接線意圖」，layout 證明「實體位置」，只有系統行為能證明
     「兩者都對」。** layout 若把連接器鏡像放置，netlist 一個字都不會變。
-  * **要分辨對接的物理型式**：兩側同型 → 中間必然有線束；公母直接對接 →
-    只剩 footprint 方位。兩者的定案途徑完全不同。
+  * **要分辨對接的物理型式**：兩側同型 → 中間必然有線束，接法只能靠 net 名
+    或線束圖；公母直接對接 → 直通。兩者的定案途徑完全不同。
   * **殘存候選要用「會不會壞」排除**：代入後看會不會造成立即而明顯的故障。
     系統若實際會動，該候選就被排除了。
 """
-import itertools
 import re
 from collections import deque
 
@@ -56,10 +55,12 @@ class MateMapError(Exception):
     """已批准的對接對映本身有問題 —— 載入時就要擋，不能等到走圖。"""
 
 
-# 對接排名要多有把握才算定案。比照 mate 報告既有的判讀：直通唯一勝出、
-# 零矛盾、且語意相符的領先幅度夠大。
-MATE_MIN_MARGIN = 2
-# 冠軍至少要有這麼多支腳的 net 名兩側相符 —— 這是**正面證據**的下限。
+# 對接的前提：板子都已在實體世界接過、可以用。所以工具不判斷「有沒有接」，
+# 只判斷「怎麼接」：
+#   公母直接對接 -> 一律直通（不考慮 footprint 畫錯）；證據只用來確認
+#                   「這兩顆真的是一對」。
+#   線束（兩側同型）-> 逐腳比 net 名；每支訊號腳都唯一對上才算數。
+# 直通至少要有這麼多支腳的 net 名兩側相符 —— 這是**正面證據**的下限。
 # 沒有它，「零矛盾」在資訊量不足的小連接器上會無條件通過。
 MATE_MIN_SEMANTIC = 4
 
@@ -155,16 +156,12 @@ class Fabric(object):
                 self.mate_evidence[(ba, ra, bb, rb)] = spec.get("evidence", "")
             else:
                 # 連接器只負責「訊號有沒有連到」——netlist 連得上就是事實，
-                # 不需要 datasheet。所以這裡讓**拓樸排名自己定案**：
-                #   直通唯一勝出 + 零矛盾 + margin 足夠 -> inferred，不掛 caveat
-                #   排名決定不了                        -> mate:ambiguous，要問人
-                #
-                # ⚠️ 這不是放寬標準，而是把 `verification.md` 早就寫下的原則
-                #    落實成程式：「殘存候選要用會不會壞來排除；系統若實際會動，
-                #    該候選就被排除了」。實際出貨的板子是接著線在跑的，對應若
-                #    錯了 netlist 根本對不上，早就會被發現。
-                ok, why = self._rank_decides(ba, ra, bb, rb)
-                pairs = [(p, p) for p in pa if p in pb]
+                # 不需要 datasheet。板子都在實體世界接過，所以這裡讓工具
+                # **自己定案**（規則見 `_mate_decision`）：
+                #   定案        -> inferred，不掛 caveat
+                #   定不了      -> mate:ambiguous，要問人
+                ok, why = self._decide_mate(ba, ra, bb, rb)
+                pairs = self._mate_decision(ba, ra, bb, rb)["pairs"]
                 if ok:
                     cav = []
                     self.mate_status[(ba, ra, bb, rb)] = "inferred"
@@ -177,31 +174,134 @@ class Fabric(object):
                     self.mate.setdefault((ba, ra, p), []).append(((bb, rb, q), cav))
                     self.mate.setdefault((bb, rb, q), []).append(((ba, ra, p), cav))
 
-    def _rank_decides(self, ba, ra, bb, rb):
-        """排名有沒有把握到可以定案。回傳 (可定案?, 證據字串)。"""
-        try:
-            rank, n = self.rank_mating(ba, ra, bb, rb)
-        except Exception as exc:                      # pragma: no cover
-            return False, "排名失敗：%s" % exc
-        if len(rank) < 2:
-            return False, "候選不足，無法比較"
-        (b1, m1, l1), (b2, m2, l2) = rank[0], rank[1]
-        straight = bool(l1.startswith("直通") or re.match(r"^(\w+)->\1 正向$", l1))
-        margin = (-m1) - (-m2)
-        why = ("最佳 %s（矛盾 %d、語意 %d），次佳 %s（矛盾 %d、語意 %d），margin %d"
-               % (l1, b1, -m1, l2, b2, -m2, margin))
-        if not straight:
-            return False, why + "；**勝出的不是直通**"
-        if b1 != 0:
-            return False, why + "；最佳仍有矛盾腳"
-        if -m1 < MATE_MIN_SEMANTIC:
-            # ⚠️ 「零矛盾」在小型連接器上是**空過的檢查**：5 腳同軸接頭兩側都
-            #    沒有相符的 net 名，任何對應都零矛盾。沒有正面證據就不能定案。
-            return False, (why + "；**沒有正面證據**（語意相符 %d < %d），"
-                           "零矛盾在此無鑑別力" % (-m1, MATE_MIN_SEMANTIC))
-        if b2 == 0 and margin < MATE_MIN_MARGIN:
-            return False, why + "；與次佳難以區分"
-        return True, why
+    def _decide_mate(self, ba, ra, bb, rb):
+        """能不能自己定案。回傳 (可定案?, 證據字串)。"""
+        d = self._mate_decision(ba, ra, bb, rb)
+        return d["ok"], d["why"]
+
+    # 零件庫名稱前綴：`Conn_`、`Conn-`，以及跟在後面的分類字（`Header_`、
+    # `DSUB_`、`B04_`）。剝掉之後第一個 `-` 之前就是系列名（SEAF、T2M、UEC5）。
+    _RX_FAMILY_PREFIX = re.compile(r"^Conn[-_](?:[A-Za-z0-9]+_)?", re.I)
+
+    @staticmethod
+    def family(footprint):
+        return Fabric._RX_FAMILY_PREFIX.sub("", footprint or "").split("-")[0].upper()
+
+    def mate_form(self, ba, ra, bb, rb):
+        """`direct`（公母直接對接）或 `harness`（兩側同型，中間必有線束）。
+
+        ⚠️ 不判斷誰公誰母——那不影響結論。兩側同系列（T2M 對 T2M、UEC5 對
+           UEC5）插不起來，中間一定有線；不同系列（SEAF 對 SEAM）就是直接對插。
+        """
+        fa = self.family(self.nl[ba].parts.get(ra, ""))
+        fb = self.family(self.nl[bb].parts.get(rb, ""))
+        return "harness" if fa and fa == fb else "direct"
+
+    @staticmethod
+    def phys_size(pins):
+        """連接器的實體大小估計，用來找可能對插的另一顆。
+
+        ⚠️ **不可用已接腳數**：`pins()` 只含已接的腳，兩顆對插的連接器空腳
+           數不同時，已接腳數就不同，真正的一對會被分到不同組。改用最大腳號
+           （字母排：排數 × 最大欄號）；只有最末端的腳剛好是空腳時才會低估。
+        """
+        pins = list(pins)
+        if not pins:
+            return 0
+        if all(p.isdigit() for p in pins):
+            return max(int(p) for p in pins)
+        if all(re.match(r"^[A-Za-z]\d+$", p) for p in pins):
+            # 排數從 A 算到最後一排，不數出現過幾排 —— 整排空腳的排不在 pins 裡
+            rows = ord(max(p[0].upper() for p in pins)) - ord("A") + 1
+            return rows * max(int(p[1:]) for p in pins)
+        return len(pins)
+
+    def _mate_decision(self, ba, ra, bb, rb):
+        """對接怎麼接、有沒有把握。回傳 dict：
+
+        `ok` / `why` / `form` / `pairs`（採用的腳位對應）/ `match` / `bad` /
+        `signals`（線束：對上的訊號腳數）。
+        """
+        key = (ba, ra, bb, rb)
+        cache = self.__dict__.setdefault("_decision_cache", {})
+        if key not in cache:
+            pa, pb = self.nl[ba].pins(ra), self.nl[bb].pins(rb)
+            form = self.mate_form(ba, ra, bb, rb)
+            if form == "direct":
+                cache[key] = self._decide_direct(pa, pb)
+            else:
+                cache[key] = self._decide_harness(pa, pb)
+        return cache[key]
+
+    def _decide_direct(self, pa, pb):
+        """公母直接對接：接法一律直通。證據只回答「這兩顆真的是一對嗎」。
+
+        ⚠️ 矛盾腳不否決：已確認過的真實案例（interposer.J3↔DPU.J2001 的
+           `3P4V_C` 對 `3P3V_C_VDD_X`）就是兩側對同一條軌的電壓命名不同。
+           填錯配對時則是**幾乎沒有相符、到處矛盾**（J3↔J2002：相符 0、
+           矛盾 36），所以判準是「相符夠多，且多於矛盾」。
+        """
+        pairs = [(p, p) for p in pa if p in pb]
+        bad = sum(1 for p, q in pairs
+                  if Fabric.contradicts(self.cls(pa[p]), self.cls(pb[q])))
+        match = sum(1 for p, q in pairs if self.norm(pa[p]) == self.norm(pb[q]))
+        why = "公母直接對接 -> 直通（語意相符 %d、矛盾 %d）" % (match, bad)
+        ok = True
+        if match < MATE_MIN_SEMANTIC:
+            # ⚠️ 「零矛盾」在小型連接器上是**空過的檢查**：沒有相符的 net 名時
+            #    任何配對都零矛盾。沒有正面證據就不能確認這兩顆是一對。
+            ok = False
+            why += ("；**正面證據不足**（語意相符 %d < %d）—— 兩側命名不同"
+                    "（補 net_normalize）或兩顆根本不是一對" % (match, MATE_MIN_SEMANTIC))
+        elif bad >= match:
+            ok = False
+            why += "；矛盾不少於相符 —— 這兩顆很可能不是一對，請確認配對"
+        return dict(ok=ok, why=why, form="direct", pairs=pairs,
+                    match=match, bad=bad, signals=0)
+
+    def _decide_harness(self, pa, pb):
+        """線束：接法由線決定，netlist 裡沒有。只能逐腳比 net 名。
+
+        每支**訊號腳**（非電源／地）都要在對面找到唯一同名的腳，兩個方向都要。
+        電源／地不必對上——追訊號時本來就跳過。兩側都只有電源／地時，
+        接法不影響任何訊號，直接放行。
+
+        定不了時退回直通對應並由呼叫端掛 `mate:ambiguous`（它只是佔位，
+        真正的接法要使用者用 `mate_map` 提供）。
+        """
+        def signals(pins):
+            return {p: self.norm(n) for p, n in pins.items()
+                    if n and not self.is_rail(self.cls(n)) and not self.is_power(n)}
+        sa, sb = signals(pa), signals(pb)
+        inv_a, inv_b = {}, {}
+        for p, n in sa.items():
+            inv_a.setdefault(n, []).append(p)
+        for q, n in sb.items():
+            inv_b.setdefault(n, []).append(q)
+        mapping, miss = {}, []
+        for p, n in sorted(sa.items()):
+            if len(inv_a[n]) == 1 and len(inv_b.get(n, [])) == 1:
+                mapping[p] = inv_b[n][0]
+            else:
+                miss.append(p)
+        miss_b = [q for q in sorted(sb) if q not in set(mapping.values())]
+        straight = [(p, p) for p in pa if p in pb]
+        base = dict(form="harness", match=len(mapping), bad=0,
+                    signals=len(mapping))
+        if not sa and not sb:
+            return dict(base, ok=True, pairs=straight,
+                        why="線束，兩側只有電源／地 -> 接法不影響訊號追蹤")
+        if miss or miss_b:
+            sample = ", ".join(["A.%s=%s" % (p, pa[p]) for p in miss[:3]]
+                               + ["B.%s=%s" % (q, pb[q]) for q in miss_b[:3]])
+            return dict(base, ok=False, pairs=straight,
+                        why=("線束，訊號腳 %d 支靠名稱唯一對上、%d 支對不上"
+                             "（例：%s）—— 線束接法不在 netlist 裡，請提供 mate_map"
+                             % (len(mapping), len(miss) + len(miss_b), sample)))
+        same = sum(1 for p, q in mapping.items() if p == q)
+        return dict(base, ok=True, pairs=sorted(mapping.items()),
+                    why=("線束，%d 支訊號腳全部靠名稱唯一對上（其中同號 %d）"
+                         % (len(mapping), same)))
 
     def mate_partners(self, board, refdes):
         """對接對手查詢 —— **唯一**的實作。
@@ -351,91 +451,36 @@ class Fabric(object):
         return self.part_package.get(self._pn(board, refdes))
 
     # ---- 對接驗證 ---------------------------------------------------------
-    def _candidates(self, pins):
-        if all(p.isdigit() for p in pins):
-            n = len(pins)
-            half = n // 2
-            return [
-                ("直通 n->n", lambda p: p),
-                ("換排(奇偶互換)",
-                 lambda p: str(int(p) + 1 if int(p) % 2 else int(p) - 1)),
-                ("整體反轉", lambda p: str(n + 1 - int(p))),
-                ("同排反轉", lambda p: str(half + 1 - int(p) if int(p) <= half
-                                           else 3 * half + 1 - int(p))),
-            ]
-        rows = sorted({p[0] for p in pins})
-        ncol = max(int(p[1:]) for p in pins)
-        out = []
-        for perm in itertools.permutations(rows):
-            for rev in (False, True):
-                def fn(p, perm=perm, rev=rev):
-                    r, i = p[0], int(p[1:])
-                    return "%s%d" % (perm[rows.index(r)],
-                                     ncol + 1 - i if rev else i)
-                out.append(("%s->%s %s" % ("".join(rows), "".join(perm),
-                                           "反轉" if rev else "正向"), fn))
-        return out
-
-    def rank_mating(self, ba, ra, bb, rb):
-        pa, pb = self.nl[ba].pins(ra), self.nl[bb].pins(rb)
-        res = []
-        for label, fn in self._candidates(list(pa)):
-            bad = match = 0
-            for p in pa:
-                try:
-                    q = fn(p)
-                except Exception:
-                    continue
-                if Fabric.contradicts(self.cls(pa.get(p)),
-                                      self.cls(pb.get(q))):
-                    bad += 1
-                if self.norm(pa.get(p)) == self.norm(pb.get(q)):
-                    match += 1
-            res.append((bad, -match, label))
-        res.sort()
-        return res, len(pa)
-
     def verify_mating(self, verbose=True):
         report = []
         for ba, ra, bb, rb in self.mates:
-            rank, n = self.rank_mating(ba, ra, bb, rb)
-            (b1, m1, l1), (b2, m2, l2) = rank[0], rank[1]
-            straight = l1.startswith("直通") or re.match(r"^(\w+)->\1 正向$", l1)
-            ok = bool(straight) and b1 == 0 and (b2 > 0 or -m1 > -m2)
+            d = self._mate_decision(ba, ra, bb, rb)
+            n = len(self.nl[ba].pins(ra))
             status = self.mate_status.get((ba, ra, bb, rb), "unapproved")
             row = dict(a="%s.%s" % (ba, ra), b="%s.%s" % (bb, rb), pins=n,
-                       best=l1, best_bad=b1, best_match=-m1,
-                       second=l2, second_bad=b2, second_match=-m2,
-                       margin=(-m1) - (-m2), ok=ok, status=status,
+                       form=d["form"], match=d["match"], bad=d["bad"],
+                       ok=d["ok"], decision=d["why"], status=status,
                        evidence=self.mate_evidence.get((ba, ra, bb, rb), ""),
                        kind=self._mate_kind(ba, ra, bb, rb))
             report.append(row)
             if verbose:
                 print("  %s <-> %s  (%d pin, %s)" % (row["a"], row["b"], n, row["kind"]))
-                print("        最佳 %-24s 矛盾 %d 腳, 語意相符 %d"
-                      % (l1, b1, -m1))
-                print("        次佳 %-24s 矛盾 %d 腳, 語意相符 %d   -> %s"
-                      % (l2, b2, -m2,
-                         "直通唯一勝出（margin %d）" % row["margin"] if ok
-                         else "!! 無法唯一判定，需 layout 或實測"))
+                print("        判定 %s%s" % ("" if d["ok"] else "!! ", d["why"]))
                 note = {"approved": "已由 mate_map 批准",
-                        "inferred": "拓樸排名定案 [?]（netlist 連得上即事實；"
-                                    "對應若錯，實機根本不會動）",
-                        "ambiguous": "**排名無法定案** -> 下游帶 mate:ambiguous，"
-                                     "需 layout／線束圖／實測"}
+                        "inferred": "工具定案 [?]（板子實際接過可以用；"
+                                    "netlist 連得上即事實）",
+                        "ambiguous": "**工具定不了** -> 下游帶 mate:ambiguous，"
+                                     "請確認配對或提供 mate_map"}
                 print("        定案狀態 %s —— %s" % (status, note.get(status, "")))
                 ev = self.mate_evidence.get((ba, ra, bb, rb))
-                if ev:
+                if status == "approved" and ev:
                     print("        證據 %s" % ev)
         return report
 
     def _mate_kind(self, ba, ra, bb, rb):
-        fa = self.nl[ba].parts.get(ra, "")
-        fb = self.nl[bb].parts.get(rb, "")
-        base = lambda s: re.sub(r"^Conn_", "", s).split("-")[0].upper()
-        if base(fa) and base(fa) == base(fb):
-            return "兩側同型 -> 很可能中間有線束，腳位對應由線束決定"
-        return "公母直接對接 -> 無線束，只剩 footprint 方位問題（查 layout）"
+        if self.mate_form(ba, ra, bb, rb) == "harness":
+            return "兩側同型 -> 中間有線束，腳位對應由線束決定"
+        return "公母直接對接 -> 直通"
 
     # ---- 模型解析 ---------------------------------------------------------
     def _model_at(self, board, refdes):

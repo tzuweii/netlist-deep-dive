@@ -18,7 +18,8 @@
 
 1. 每塊板**三份**：`.DSN` + `.asc` + BOM，丟進同一個資料夾。**缺任何一份就先問，
    不要開始。** 三份都是使用者主動提供的——工具不會去找、不會去猜、也不會少一份
-   就降級跑。
+   就降級跑。三份要是**同一版設計**：netlist 匯出之後線路圖又改過，兩份各自正確
+   卻對不上，`init` 會在對帳時停下來。
 
    `.DSN` 若有子設計目錄，一併放進來。**設計不能開在 Capture 裡**（旁邊會有
    `.DSNlck`），否則轉換會無限等待；工具會先擋下來並要求你關閉。
@@ -30,7 +31,7 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 ```
 
 會印出三件事：netlist ↔ BOM 配對（**用 refdes 交集，不用檔名猜**）、連接器對接
-候選與排名證據、datasheet 盤點。
+候選與判定依據、datasheet 盤點。
 
 3. **只有兩件事要問使用者**，用 `AskUserQuestion` 一次問完：
 
@@ -42,6 +43,8 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 ```bash
 python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
 ```
+
+`init --run`／`migrate --run` **預設不下載規格書**（要下載加 `--datasheets`），不下載時照樣產生 `datasheets/INDEX.md`。
 
 先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
 → `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
@@ -57,7 +60,7 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 **`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
 
 產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、
-`datasheets/MISSING.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
+`datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
 5. **跑完後我接手寫架構文件** —— 那是分析結論，腳本產不出來。
 
@@ -71,10 +74,10 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 | symbol 腳位名入庫 | ✅ | 同料號腳位名不一致時**不寫入**，列出來等人釐清 |
 | netlist ↔ BOM 配對 | ✅ | refdes 命中率 ≥ 90% 且領先次佳 ≥ 30%；否則**停下來問** |
 | `bom_scope` | ✅ | 檔名含 `SMT` → `smt_only`，否則 `complete` |
-| `mates` | ✅ | 腳數 ≥ 8、直通唯一勝出、零矛盾、語意相符 ≥ 4、margin ≥ 2 |
+| `mates` | ✅ | 腳數 ≥ 8；公母直接對接：實體大小相同、直通語意相符 ≥ 4 且多於矛盾；線束：訊號腳全部靠名稱唯一對上且 ≥ 4 支 |
 | `mates`（兩側都有同分候選） | ❌ | **netlist 真的分不出來**，列進 `SETUP.md` 等人決定 |
 | `trace.start` | 後援 | 未設時自動用所有對接連接器當起點 |
-| `net_normalize` | ❌ | 專案命名習慣，猜不得（見 `pitfalls.md` #8）。init 會**列出兩側命名差異樣本**供你寫規則 |
+| `net_normalize` | ❌ | 專案命名習慣，猜不得（削掉有意義的數字會把 `CLK_1`／`CLK_2` 併成同一條）。init 會**列出兩側命名差異樣本**供你寫規則 |
 | `endpoints` / `part_package` / `mate_map` | ❌ | 留空，列進 `SETUP.md` 待補 |
 
 ⚠️ **`net_normalize` 對對接判定是決定性的。** 實測同一組 40-pin 連接器：沒有
@@ -88,12 +91,12 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 ## 2. 補 datasheet
 
 ```bash
-python scripts/ndd.py datasheets              # 盤點 + 自動下載 + 產出 MISSING.md
+python scripts/ndd.py datasheets              # 盤點 + 自動下載 + 產出 INDEX.md 對照表
 python scripts/ndd.py datasheets --pn <料號> --url <你查到的網址>
 ```
 
-自動下載只對少數原廠站有效。流程：自動盤點 → 對 `MISSING.md` 裡的料號用
-**WebSearch** 找官方網址 → `--url` 抓下來 → 自製件／連接器抓不到是正常的。
+自動下載只對少數原廠站有效。流程：自動盤點 → 對 `INDEX.md` 標「缺」的料號用
+**WebSearch** 找官方網址 → `--url` 抓下來 → 自製件抓不到是正常的。
 
 ---
 
@@ -161,7 +164,7 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 **這一步不可省略。** 交付時要明確告訴使用者：
 
 > 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
-> 排名無法定案的對接（`mate:ambiguous`）是候選不是結論；`unclassified` 端點
+> 工具定不了的對接（`mate:ambiguous`）是佔位不是結論；`unclassified` 端點
 > 是**還沒分類**，不是「已確認為負載」。
 
 ---
@@ -178,7 +181,7 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 | `verified-pins.csv` | **datasheet 原文快取** + symbol 腳位名 | `pinfn` 自動累積；symbol 列由 `init` 整批重建 |
 | `hier/*_parts.csv` / `hier/*_nodes.csv` | **可重生的衍生物**（`.DSN` 轉出） | `init` 產生；`.DSN` 更新就重跑 |
 | `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
-| `export/cis_parts.csv` | **選用加速器**（料件分類快照），不是前提 | 使用者自行從 CIS 唯讀匯出；入 `MANIFEST.md` |
+| `export/cis_parts.csv` | **選用加速器**（料件分類快照），不是前提 | 使用者自行從 CIS 唯讀匯出（方式見 `docs/設計說明.md`）；入 `MANIFEST.md` |
 | `MANIFEST.md` | 輸入檔指紋 | 寫文件時 |
 
 **原始來源是資產，結論是拋棄式的。**

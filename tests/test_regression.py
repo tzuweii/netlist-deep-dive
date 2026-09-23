@@ -735,12 +735,79 @@ class TestNetClass(unittest.TestCase):
         self.assertIsNone(Fabric.cls(None))
 
 
+class TestMateForm(unittest.TestCase):
+    """對接前提：板子都實際接過可以用 —— 只判斷「怎麼接」。
+
+    公母直接對接（兩側系列不同）一律直通；線束（兩側同系列）逐腳比 net 名。
+    """
+
+    def _pair(self, fa, fb, nets_a, nets_b):
+        """nets_x: {pin: net}。兩塊板各一顆連接器，宣告成一組 mate。"""
+        pj = fixtures.Project()
+        for key, rd, fp, nets in (("a", "J1", fa, nets_a), ("b", "J2", fb, nets_b)):
+            pj.board(key, {rd: fp},
+                     {n: [(rd, p)] for p, n in nets.items()},
+                     [{"Part Reference": rd, "Manufacturer_PN": fp}])
+        pj.cfg["mates"] = [["a", "J1", "b", "J2"]]
+        return _fab(pj)
+
+    def test_family_ignores_library_prefix(self):
+        self.assertEqual(Fabric.family("Conn_SEAF-20-05p0-L-04-1-A-K-TR"), "SEAF")
+        self.assertEqual(Fabric.family("Conn-Header_T2M-115-01-L-D-TH"), "T2M")
+        self.assertEqual(Fabric.family("Conn_B04_UEC5-019-1-H-D-RA-2-A"), "UEC5")
+
+    def test_direct_mate_is_straight_despite_contradictions(self):
+        """實例 interposer.J3↔DPU.J2001：兩側對同一條軌的電壓命名不同，
+        矛盾不得否決直通。"""
+        a = {"1": "SIG_A", "2": "SIG_B", "3": "SIG_C", "4": "SIG_D", "5": "3P4V_C"}
+        b = {"1": "SIG_A", "2": "SIG_B", "3": "SIG_C", "4": "SIG_D", "5": "3P3V_C"}
+        fab = self._pair("Conn_SEAF-1", "Conn_SEAM-1", a, b)
+        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "inferred")
+        self.assertEqual(fab.mate[("a", "J1", "5")][0][0], ("b", "J2", "5"))
+
+    def test_direct_mate_without_evidence_asks(self):
+        """相符的 net 名不夠 —— 確認不了這兩顆是一對。"""
+        a = {str(i): "X%d" % i for i in range(1, 9)}
+        b = {str(i): "Y%d" % i for i in range(1, 9)}
+        fab = self._pair("Conn_SEAF-1", "Conn_SEAM-1", a, b)
+        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "ambiguous")
+
+    def test_harness_follows_names_even_when_crossed(self):
+        """線束可以任意接：名稱唯一對上就照名稱接，不管同不同號。"""
+        a = {"1": "TX", "2": "RX", "3": "GND"}
+        b = {"1": "RX", "2": "TX", "3": "GND"}
+        fab = self._pair("Conn_T2M-105", "Conn_T2M-105", a, b)
+        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "inferred")
+        self.assertEqual(fab.mate[("a", "J1", "1")][0][0], ("b", "J2", "2"))
+        self.assertEqual(fab.mate[("a", "J1", "2")][0][0], ("b", "J2", "1"))
+
+    def test_harness_with_unmatched_signal_asks(self):
+        """TX/RX 各自從自己的角度命名 —— netlist 裡沒有線束接法。"""
+        a = {"1": "T1_TX", "2": "T1_RX"}
+        b = {"1": "T2_TX", "2": "T2_RX"}
+        fab = self._pair("Conn_UEC5-019", "Conn_UEC5-019", a, b)
+        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "ambiguous")
+        self.assertIn("mate:ambiguous", fab.mate[("a", "J1", "1")][0][1])
+
+    def test_power_only_harness_passes(self):
+        """只有電源／地：接法不影響任何訊號。"""
+        a = {"1": "VDD_6V_R", "2": "GND"}
+        b = {"1": "6V_R", "2": "AGND"}
+        fab = self._pair("Conn-Header_T2M-115", "Conn-Header_T2M-115", a, b)
+        self.assertEqual(fab.mate_status[("a", "J1", "b", "J2")], "inferred")
+
+    def test_phys_size_ignores_unconnected_pins(self):
+        """空腳不在 `pins()` 裡 —— 大小要看最大腳號，不能看已接腳數。"""
+        self.assertEqual(Fabric.phys_size(["1", "2", "10"]), 10)
+        self.assertEqual(Fabric.phys_size(["A1", "A10", "D3"]), 40)
+
+
 class TestMateContradiction(unittest.TestCase):
     """`Fabric.contradicts` —— 「不認得名字」不等於「兩塊板對不上」。
 
     v1.8 的 `rank_mating` 直接比 `cls(a) != cls(b)`，而 `cls` 的 `SIG` 是
     catch-all：真訊號與**任何沒見過的電源／地寫法**都落在那裡。於是每遇到
-    一種新的命名慣例就會憑空生出矛盾，而 `_rank_decides` 只要一支矛盾腳就
+    一種新的命名慣例就會憑空生出矛盾，而 `_decide_mate` 只要一支矛盾腳就
     擋掉 `inferred`。逐板補正規式追不完，所以改成：雙方都要被正面辨識成
     電源／地，才算矛盾。
     """

@@ -39,7 +39,7 @@ GATING_ORDER = [ALWAYS, CONDITIONAL, UNKNOWN]
 #    端點分類狀態改由 `endpoint_kind` 欄與 `coverage` / `REVIEW.md` 呈現。
 CAVEAT_CEILING = {
     # 連接器：netlist 連得上即事實。排名定案就不掛 caveat；只有排名決定不了
-    # 才是真的未知（見 ndd_graph._rank_decides）。
+    # 才是真的未知（見 ndd_graph._mate_decision）。
     "mate:ambiguous":             UNKNOWN,
     "mate:missing":               UNKNOWN,
     "package:inferred":           CAVEATED,   # 由 netlist/BOM 推出，非人工確認

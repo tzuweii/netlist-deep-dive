@@ -165,5 +165,5 @@
      "known_exceptions": {"U703": "跳號，實際在 U704"}}
   ],
 
-  "datasheets": {"dir": "datasheets", "parts": []}
+  "datasheets": {"dir": "datasheets", "parts": [], "files": {}}
 }

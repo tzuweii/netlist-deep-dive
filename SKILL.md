@@ -18,15 +18,16 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 | `.DSN` | **階層**（零件在哪個子電路）與**腳位功能名**（`SENSE3+`、低有效標記） |
 
 `.DSN` 由 `init` 自動透過 Capture 自己的 TCL API **唯讀**轉成兩份 CSV，
+轉完逐條對帳 `.asc`：不一致就停下來，不會默默採用。
 
 ## 開始前先讀
 
 | 檔案 | 什麼時候讀 |
 |---|---|
-| `references/pitfalls.md` | **每次都讀。** 答案會怎麼壞掉：6 個輸出觸發器（寫句子時比對）、5 條格式事實、8 條背景認識 |
+| `references/pitfalls.md` | **每次都讀。** 答案會怎麼壞掉：6 個輸出觸發器（寫句子時比對）、5 條格式事實、7 條背景認識 |
 | `references/models.md` | **要建模型或追訊號前一定要讀。** transfer/control/endpoint 的分界 |
 | `references/verification.md` | **要驗證跨板對接、或交付前一定要讀。** 分層驗證，以及哪些東西**結構上驗不到** |
-| `references/datasheets.md` | 需要 datasheet 時讀 |
+| `references/datasheets.md` | 要下載／補規格書，或 `INDEX.md` 標「缺」想追查時讀。只是查某顆用哪份規格書，看 `datasheets/INDEX.md` 就夠 |
 | `references/part_classification.md` | 看 `coverage` 的分類、或要補 `part_class` 時讀 |
 | `references/project-lifecycle.md` | **建檔、補規格書、建模、寫文件、交付時讀。**平常回答電路問題**完全用不到** |
 
@@ -96,8 +97,8 @@ symbol 的畫法，所以屬名字級事實）、**零件在哪個子電路**。
 
    只有 `signal_transfer` 邊硬性需要 `[D 檔名 p.x]`。連接器、被動網路的拓樸可以
    標 `[N 板名 refdes.pin]` 並寫出推理，**不要停在 `[D 缺]`**——而且
-   ⚠️ **`MISSING.md` 說「缺」不可信**（只比料號前 6 碼與檔名，family datasheet
-   必然漏判），標 `[D 缺]` 之前先用 `pinfn` 複核 → `references/datasheets.md`。
+   要找哪份規格書先看 `datasheets/INDEX.md`：標「缺」的才寫 `[D 缺]`；標
+   「待確認」的多半是系列規格書，開檔確認後照用 → `references/datasheets.md`。
 
 **2. netlist 有、BOM 無，是未貼件還是不可判定？** 預設是**未貼件 (DNI)**——
    BOM 是這塊板的權威，工具不做變體推理，也不質疑使用者提供的 BOM。
@@ -141,6 +142,8 @@ symbol 的畫法，所以屬名字級事實）、**零件在哪個子電路**。
 | `confidence: *` | **不寫欄位名**——改成一句話講最弱的那個環節 |
 | `bom-scope-insufficient` | 「這份 BOM 不收這類零件，所以**看不出**有沒有貼」 |
 
+**證據強弱和通不通是兩件事**：一條路可以證據完整、但要軟體選通才通，分開講。
+
 判準：**回答裡不該出現底線、冒號組成的識別碼。** 若出現，代表我在轉貼工具輸出
 而不是在回答問題。
 
@@ -150,7 +153,7 @@ symbol 的畫法，所以屬名字級事實）、**零件在哪個子電路**。
 ### 其他仍然適用的原則
 
 - **通則一定要展開逐顆比對**（`role_rules`），通則幾乎一定有例外。
-- **跨板對接要枚舉排名**，不能只看「兩側相符」。
+- **跨板對接先分物理型式**：公母直接對接走直通，線束逐腳比名稱。
 - **netlist 描述設計，不描述手上那片板。** rework、飛線、換料都不在裡面。
 
 ### 產出物政策
@@ -222,7 +225,7 @@ python ndd.py trace --board <板> --from J4 --follow-mates   # 允許跨板
 
 | `resolved_by` | 來源 | 有原文？ | 回答得了什麼 |
 |---|---|---|---|
-| `not_applicable` / `user_confirmed` | datasheet | ✅ 逐字 + 頁碼 + SHA-256 | 「這支腳**做什麼**」 |
+| `not_applicable` / `user_confirmed` / `symbol_selected` | datasheet | ✅ 逐字 + 頁碼 + SHA-256 | 「這支腳**做什麼**」 |
 | `capture_symbol` | `.DSN` 的 symbol | ❌ **只有名字** | 「這支腳**叫什麼**」 |
 
 symbol 列**不會**讓 datasheet 抽取被跳過——兩者互相佐證，不是互相取代。
@@ -232,28 +235,20 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者互相佐證，不�
 （同料號不同封裝腳位不同是最常見的成因）。默默採用 datasheet 那筆，等於把
 錯誤封裝的腳位名凍結成資產。
 
-⚠️ **同一料號的兩顆零件 symbol 腳位名不一致時，整筆不寫入。** 那代表其中一顆
-用錯 symbol，或 BOM 標錯料號——不可合併，也不可挑一個。
+⚠️ **`pinfn` 選不出封裝欄時，把它印的原因講給使用者、由他決定，不要自己挑。**
+做法見 `references/datasheets.md`。
 
-⚠️ **`pinfn` 抽到多筆時不替你挑。** 一份 datasheet 涵蓋多種封裝時會把每筆的
-頁碼、腳位名與腳號欄位攤出來，要 `--pick <n>`，**在那之前不寫快取**。
 
-> **快取原文，永不快取解讀。**
-> 快取的是逐字內容 + 出處（檔名／頁碼／SHA-256／封裝欄），不是「pin1 與 pin3
-> 內部連通」這種推出來的結論。原文快取 5 秒就能核對；推論快取會把錯誤凍結成
-> 永久資產。datasheet 換版時 SHA-256 不符會自動失效重抽。
+### 封裝判定的結果怎麼讀
 
-### 封裝判定只用 netlist + BOM
+| 工具的判定 | 回答時 |
+|---|---|
+| 使用者指定、或該料號只有一個模型 | 照用 |
+| 推論出來的 | 標 `[?]`，交付時列進人工複驗 |
+| 證據不足 | 列出來請使用者指定，**不替他假設** |
+| 與 netlist 矛盾 | 照實講出來——使用者指定的也一樣（**人講的最大，但矛盾要講出來**） |
 
-**工具不解析 datasheet 的腳位表**（每家排版不同，一列錯位整張表就作廢）。改用
-三個證據排名：模型宣告的電源/接地腳實際接在哪 `[N 板名 refdes.pin]`、訂購碼的
-封裝後綴 `[B 板名 refdes]`、layout 的 footprint 名稱 `[N 板名 refdes.pin]`。
-`audit` 的 [1.5] 段會逐顆列出判定與證據。
-
-**推論出來的一律標 `[?]`**，並帶 `package:inferred` caveat 沿路徑傳到 CSV。
-門檻是「零矛盾 + 唯一勝出 + 至少一個獨立來源佐證」，達不到就列入待補，
-**不替你假設**。即使使用者明確宣告 `part_package`，與 netlist 矛盾仍會 FAIL
-（**人講的最大，但矛盾要講出來**）。
+怎麼算出來的，只有建元件模型時才需要，見 `references/models.md`。
 
 ### 追跡停在哪，以及為什麼那是對的
 
@@ -268,22 +263,9 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者互相佐證，不�
 
 ### 跨板對接怎麼判讀
 
-只有「直通唯一勝出且 margin 夠大」才算站得住。**margin ≤ 4 一定要標明證據薄弱。**
-工具也會判斷是「兩側同型 → 中間有線束」還是「公母直接對接 → 只剩 footprint
-方位」，兩者定案途徑完全不同。
-
-**連接器只負責「訊號有沒有連到」**——netlist 連得上就是事實，不需要 datasheet，
-所以排名會自己定案：
-
-| 狀態 | 條件 | 下游 |
-|---|---|---|
-| `approved` | `ndd.json` 的 `mate_map` 明確批准 | 無 caveat |
-| `inferred` | 直通唯一勝出 + 零矛盾 + margin ≥ 2 | 無 caveat，標 `[?]` |
-| `ambiguous` | 排名決定不了 | `mate:ambiguous`，confidence 降為 unknown |
-
-**殘存候選要用「會不會壞」排除**：代入後看它會不會造成立即而明顯的故障
-（SDA/SCL 對調 → I2C 全滅）。系統若實際會動，該候選就被排除了。這通常比找
-線束圖快，而且是**唯一能同時涵蓋 layout 正確性的證據**。
+對接是推論（前提：板子都已實際接過、可以用）。公母直接對插就是直通；同系列
+接頭中間必有線束，照訊號名稱對應。兩側主備各有多組、或線束名稱對不上時，工具
+定不了，要使用者提供接法。細節見 `references/verification.md`「跨板對接」。
 
 ### `trace` 產出兩份，不可互換
 
@@ -291,9 +273,7 @@ symbol 列**不會**讓 datasheet 抽取被跳過——兩者互相佐證，不�
 - `topology_hint.csv` — control／stateful／參數控制／未知邊界，是**功能說明
   不是連通**，永不得當成下一跳
 
-### 零件分類的順位
+### 零件分類
 
-人工宣告 > CIS 料號查表（**事實**）> footprint 樣式 > refdes 前綴（後兩者是
-**推論**，標 `[?]`）> 未辨識（列進「需你確認」，**工具不猜**）。主力是
-footprint——它就在 `.asc` 裡，不需要 CIS 也不會過期。實測六塊板涵蓋 96.9%、
-未辨識只剩 1.7%。詳見 `references/part_classification.md`。
+由 footprint、料號樣式、refdes 開頭推出來的分類標 `[?]`；認不出來的列給使用者
+補，**工具不猜**。標記怎麼讀見 `references/part_classification.md`。

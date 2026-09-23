@@ -221,6 +221,40 @@ class TestSymbolImport(unittest.TestCase):
         self.assertEqual(len(rep["conflicts"]), 1)
         self.assertEqual(self.rows(), [])
 
+    def test_different_boards_keep_their_own_symbol_names(self):
+        """實測：SN74CBTLV3126 在 interposer 叫 OE1、在 fecu_fm 叫 SEL1。各 .DSN
+        各存一份 symbol，跨板名字不同不是錯，兩邊都要留下、各自可查。"""
+        p2, n2 = fixtures.write_hier(
+            os.path.join(self.d, "b2_parts.csv"), os.path.join(self.d, "b2_nodes.csv"),
+            PARTS, NETS, pin_names={("U1", "1"): "SEL1"})
+        pn = lambda rd: {"U1": "PART_A"}.get(rd, "")
+        rep = ndd_pinfn.import_symbols(
+            self.d, [("b", self.h, pn, self.n),
+                     ("c", ndd_hier.Hierarchy(p2, n2), pn, n2)], verbose=False)
+        self.assertEqual(rep["conflicts"], [])
+        rows = self.rows()
+        self.assertEqual(ndd_pinfn.symbol_map(rows, "PART_A", "b")["1"]["pin_name"],
+                         "SENSE3+")
+        self.assertEqual(ndd_pinfn.symbol_map(rows, "PART_A", "c")["1"]["pin_name"],
+                         "SEL1")
+        self.assertNotIn("1", ndd_pinfn.symbol_map(rows, "PART_A"),
+                         "不知道是哪塊板時，各板不一致的腳不可替你挑一個")
+
+    def test_appending_to_an_old_cache_keeps_columns_aligned(self):
+        """舊快取沒有 board 欄；直接附加新列會整列錯位。"""
+        old_cols = [c for c in ndd_pinfn.COLS if c != "board"]
+        with io.open(os.path.join(self.d, ndd_pinfn.CACHE), "w",
+                     encoding="utf-8-sig", newline="") as fh:
+            fh.write(",".join(old_cols) + "\r\n")
+            fh.write("PART_A,1,SENSE3+,,orig,a.pdf,7,x,,not_applicable,,,2026-01-01\r\n")
+        ndd_pinfn.append_cache(self.d, {"part": "PART_B", "pin": "2",
+                                        "pin_name": "EN", "text": "enable",
+                                        "resolved_by": ndd_pinfn.NOT_APPLICABLE})
+        got = {r["part"]: r for r in self.rows()}
+        self.assertEqual(got["PART_A"]["text"], "orig")
+        self.assertEqual(got["PART_B"]["pin_name"], "EN")
+        self.assertEqual(got["PART_B"]["resolved_by"], ndd_pinfn.NOT_APPLICABLE)
+
     def test_refdes_without_bom_mpn_is_skipped(self):
         self.assertEqual(self._run(lambda rd: "")["written"], 0)
 

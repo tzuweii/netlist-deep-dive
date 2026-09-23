@@ -2,7 +2,7 @@
 """板卡導覽（`<板>_Architecture.md`）——`init` 當下就寫得出來的那一半。
 
 **這份文件在結構上只能是 `[N]`/`[B]`/`[S]` 文件。** `init` 跑完的當下還沒有
-任何 datasheet（`MISSING.md` 才剛產生），所以腳位功能、訊號方向、極性、
+任何 datasheet（`INDEX.md` 才剛產生），所以腳位功能、訊號方向、極性、
 「這條路恆通」這些 `[D]` 級主張**沒有材料可寫**——想違規也違規不了。
 
 它要回答的是「拿到一塊沒看過的板子，先知道什麼會最快上手」：
@@ -349,7 +349,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None):
       u"用 `ndd.py trace --board %s --from <起點>` 查" % key)
     w(u"- [ ] **為什麼這樣設計** —— 腳本永遠寫不出來，要人接手")
     if missing_pn:
-        w(u"- [ ] **缺 %d 份規格書** —— 見 `datasheets/MISSING.md`" % missing_pn)
+        w(u"- [ ] **缺 %d 份規格書** —— 見 `datasheets/INDEX.md`" % missing_pn)
     w(u"- [ ] **§2 的重複結構代表什麼** —— 階層只告訴你「設計者這樣切」，"
       u"沒告訴你那是 9 個 slot 還是 9 路備援")
     w(u"")

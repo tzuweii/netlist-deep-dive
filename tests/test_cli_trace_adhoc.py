@@ -121,12 +121,12 @@ class TestBoardBoundary(unittest.TestCase):
            的板內結論被一個它沒依賴的跨板不確定性拉成 unknown。
         """
         clean = _rows(_project(), "--board", "ecu", "--from", "J902")
-        orig = ndd_graph.Fabric._rank_decides
-        ndd_graph.Fabric._rank_decides = lambda self, *a: (False, "測試強制未定案")
+        orig = ndd_graph.Fabric._decide_mate
+        ndd_graph.Fabric._decide_mate = lambda self, *a: (False, "測試強制未定案")
         try:
             amb = _rows(_project(), "--board", "ecu", "--from", "J902")
         finally:
-            ndd_graph.Fabric._rank_decides = orig
+            ndd_graph.Fabric._decide_mate = orig
         self.assertIn("mate:ambiguous",
                       " ".join(r["caveats"] for r in _cross(amb)),
                       "前提檢查：這個 fixture 真的有把對接弄成未定案")

@@ -101,8 +101,8 @@ class TestInitRun(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, f)), "缺 %s" % f)
         self.assertTrue(os.path.isdir(os.path.join(d, "export")))
         self.assertTrue(os.path.exists(
-            os.path.join(d, "datasheets", "MISSING.md")),
-            "跳過下載時仍要產生缺件清單")
+            os.path.join(d, "datasheets", "INDEX.md")),
+            "跳過下載時仍要產生規格書對照表")
 
     def test_config_has_every_field_even_when_empty(self):
         """未出現在骨架裡的欄位，使用者不會知道它存在。"""

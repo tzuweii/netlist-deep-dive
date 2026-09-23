@@ -59,8 +59,8 @@ class TestTraceCaveatPropagation(unittest.TestCase):
     def test_ambiguous_mate_caveat_reaches_the_csv(self):
         """排名決定不了時，caveat 必須傳到最終輸出（標了要有效）。"""
         import ndd_graph
-        orig = ndd_graph.Fabric._rank_decides
-        ndd_graph.Fabric._rank_decides = lambda self, *a: (False, "測試強制未定案")
+        orig = ndd_graph.Fabric._decide_mate
+        ndd_graph.Fabric._decide_mate = lambda self, *a: (False, "測試強制未定案")
         try:
             rows = _run_trace(_project())
             self.assertTrue(rows, "應該有輸出列")
@@ -68,17 +68,17 @@ class TestTraceCaveatPropagation(unittest.TestCase):
                 self.assertIn("mate:ambiguous", r["caveats"])
                 self.assertEqual(r["confidence"], "unknown")
         finally:
-            ndd_graph.Fabric._rank_decides = orig
+            ndd_graph.Fabric._decide_mate = orig
 
     def test_decided_mate_carries_no_caveat(self):
         import ndd_graph
-        orig = ndd_graph.Fabric._rank_decides
-        ndd_graph.Fabric._rank_decides = lambda self, *a: (True, "測試強制定案")
+        orig = ndd_graph.Fabric._decide_mate
+        ndd_graph.Fabric._decide_mate = lambda self, *a: (True, "測試強制定案")
         try:
             for r in _run_trace(_project()):
                 self.assertNotIn("mate:", r["caveats"])
         finally:
-            ndd_graph.Fabric._rank_decides = orig
+            ndd_graph.Fabric._decide_mate = orig
 
     def test_approved_mate_has_no_caveat(self):
         rows = _run_trace(_project({"ecu:J101|fe:J2": {
