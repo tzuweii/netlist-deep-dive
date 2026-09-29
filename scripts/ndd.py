@@ -2586,7 +2586,7 @@ def _arch_board(pj, key, stage="all", model=None, missing_pn=None):
 
 
 def cmd_arch(args, pj):
-    """撰寫 `<板>_Architecture.md`（A 方塊圖 → B 分塊 → C 組裝）。
+    """撰寫 `<板>_Architecture.md`（A 重建架構 → B 逐區驗證 → C 寫成文件）。
 
     每次呼叫是無工具、單回合的 `claude -p`，材料直接放進訊息——見 `ndd_write`。"""
     import ndd_write

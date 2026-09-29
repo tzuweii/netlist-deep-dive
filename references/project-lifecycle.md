@@ -136,14 +136,16 @@ schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界�
 
 ## 4. 寫架構文件（`<板>_Architecture.md`）
 
-**角度與寫法全部在 `references/architecture-brief.md`**——交接視角、方塊圖為核心、
-不用規格書、正文不加 `[ ]` 標記。這一節只講**怎麼派工**。
+**角度與寫法全部在 `references/architecture-brief.md`**——先重建架構、再寫文件；
+交接視角、不用規格書、正文不加 `[ ]` 標記，**沒有固定章節**（電路決定結構）。
+這一節只講**怎麼派工**。
 
 **init 會自動跑**；要重寫或補某塊板時才手動跑下面的指令。
 
 **材料是 `arch_pack/<板>/`**（每次撰寫前由 Facts 重新切出）：`00_skeleton.md`
-（組成、子電路之間的連線、介面、電源軌摘要、未貼件）、`00_power.md`（電源軌逐條），
-加上每個分塊一份（該塊主要零件接到誰——已依對象收斂、不逐腳——多點網路、
+（組成、子電路之間的連線、介面、電源軌摘要、未貼件）、`00_topology.md`（Facts §11
+的訊號鏈族與交會點——全板拓樸骨架）、`00_power.md`（電源軌逐條），加上每個分塊一份
+（碰到該塊的每一組訊號鏈、該塊主要零件接到誰——已依對象收斂、不逐腳——多點網路、
 階層 port；超過 40 KB 切成 `_1`／`_2`）。`index.md` 列各檔大小。
 主／備與 ×N 的每一份都照列，不合併。
 
@@ -159,9 +161,9 @@ python scripts/ndd.py --board <板> arch --stage C  # 失敗後從壞掉的階�
 
 | 階段 | 幾次呼叫 | 附上的材料 | 寫 |
 |---|---|---|---|
-| A 方塊圖 | 1 | `index.md` + `00_skeleton.md` | `arch_pack/<板>/work/A_outline.md` |
-| B 分塊 | A 大綱 ```` ```groups ```` 區塊的組數，平行 | `A_outline.md` + 該組分塊檔 | `work/B_<組號>.md` |
-| C 組裝 | 1 | `A_outline.md` + 全部 `B_*.md` | `<板>_Architecture.md` |
+| A 重建架構 | 1 | `index.md` + `00_skeleton.md` + `00_topology*.md` | `arch_pack/<板>/work/A_model.md`：全板 mental model、功能／方塊樹、主要鏈路假說、待驗證、分組 |
+| B 逐區驗證 | A 模型 ```` ```groups ```` 區塊的組數，平行 | `A_model.md` + 該組分塊檔 | `work/B_<組號>.md`：逐條追到底，對 A 標「確認／修正／無法確認」 |
+| C 寫成文件 | 1 | `00_skeleton.md` + `A_model.md` + 全部 `B_*.md` | `<板>_Architecture.md`：結構自由，以 B 驗證後的結果為準 |
 
 - **為什麼不用 subagent**：實測 subagent 每次請求固定開銷約 5 萬 token，讀檔、
   寫檔、回報又各佔一回合、每回合整份重送；b0017 六個 subagent 合計處理量遠超過

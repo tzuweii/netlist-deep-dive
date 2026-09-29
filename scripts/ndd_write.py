@@ -2,6 +2,10 @@
 """撰寫 `<板>_Architecture.md`：三階段，每次呼叫都是一個**無工具、單回合**的
 `claude -p`。
 
+先重建架構、再寫文件：A 從總覽與拓樸骨架建立全板的架構模型與方塊樹；B 依模型
+分區，沿分塊材料裡的鏈與連線逐區追蹤、驗證；C 以驗證過的模型自由寫成給人讀的
+文件。沒有固定章節——電路決定結構。
+
 為什麼不用 subagent：實測 subagent 每次請求的固定開銷約 5 萬 token（系統提示
 與工具定義），而且讀檔、寫檔、回報各佔一回合，每回合整份 context 重送一次——
 一片板六個 subagent，光重送就上百萬。這裡把材料**直接放進訊息**、叫模型**直接
@@ -31,6 +35,8 @@ TIMEOUT = 60 * 60           # 單次呼叫上限；C 階段輸出最長，實測
 # 測試替換 `claude -p` 用（init 的測試會一路跑到這裡，不能真的呼叫）。
 DEFAULT_RUNNER = None
 
+MODEL = "A_model.md"
+
 _RX_GROUP = re.compile(r"^\s*(\d+)\s*[:：]\s*(.+?)\s*$")
 _RX_FENCE = re.compile(r"^\s*```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.S)
 
@@ -56,32 +62,44 @@ def _attach(names, d):
     return u"\n\n".join(out)
 
 
+def topology_files(d):
+    """`00_topology.md`（太大時另有 `_2`、`_3`…），依序。"""
+    fs = [f for f in os.listdir(d) if re.match(r"00_topology(_\d+)?\.md$", f)]
+    return sorted(fs, key=lambda f: int((re.findall(r"_(\d+)\.md$", f) or ["1"])[0]))
+
+
+def overview_files(d):
+    """A 讀的全板總覽；不分給 B。"""
+    return ["00_skeleton.md"] + topology_files(d)
+
+
 def prompt_a(board, d):
-    return (u"板名：%s。你是 **A 階段**。依系統提示的「A 階段」要求，輸出 "
-            u"`work/A_outline.md` 的完整內容。\n\n%s"
-            % (board, _attach(["index.md", "00_skeleton.md"], d)))
+    return (u"板名：%s。你是 **A 階段**。依系統提示的「A 階段」要求，重建這塊板的"
+            u"架構模型，輸出 `work/%s` 的完整內容。\n\n%s"
+            % (board, MODEL, _attach(["index.md"] + overview_files(d), d)))
 
 
 def prompt_b(board, d, n, files):
-    return (u"板名：%s。你是 **B 階段第 %d 組**。依系統提示的「B 階段」要求，輸出 "
-            u"`work/B_%d.md` 的完整內容。\n\n%s\n\n%s"
-            % (board, n, n, _attach([WORK + "/A_outline.md"], d), _attach(files, d)))
+    return (u"板名：%s。你是 **B 階段第 %d 組**。依系統提示的「B 階段」要求，"
+            u"逐區追蹤並驗證，輸出 `work/B_%d.md` 的完整內容。\n\n%s\n\n%s"
+            % (board, n, n, _attach([WORK + "/" + MODEL], d), _attach(files, d)))
 
 
 def prompt_c(board, d, bnames):
     return (u"板名：%s。你是 **C 階段**。依系統提示的「C 階段」要求，輸出 "
             u"`%s_Architecture.md` 的完整內容。\n\n%s"
-            % (board, board, _attach([WORK + "/A_outline.md"] + bnames, d)))
+            % (board, board, _attach(["00_skeleton.md", WORK + "/" + MODEL]
+                                     + bnames, d)))
 
 
 def parse_groups(outline, available):
-    """A 大綱裡 ```groups 區塊 -> [(組號, [檔名])]。
+    """A 模型裡 ```groups 區塊 -> [(組號, [檔名])]。
 
     檔名必須都在材料裡、每份只能出現一次、材料要全部分完——任何一條不成立都
     停下來，不替 A 補分組（漏分的材料等於那幾個方塊沒人寫）。"""
     m = re.search(r"```groups\s*\n(.*?)```", outline, re.S)
     if not m:
-        raise WriteError(u"A_outline.md 沒有 ```groups 區塊")
+        raise WriteError(u"%s 沒有 ```groups 區塊" % MODEL)
     groups, seen = [], set()
     for ln in m.group(1).splitlines():
         g = _RX_GROUP.match(ln)
@@ -176,11 +194,12 @@ def run(proj_dir, board, stage="all", model=None, runner=None, echo=print):
         return tag, u
 
     if stage in ("A", "all"):
-        log.append(one("A", prompt_a(board, d), os.path.join(w, "A_outline.md")))
+        log.append(one("A", prompt_a(board, d), os.path.join(w, MODEL)))
     if stage in ("B", "all"):
+        skip = set(["index.md"] + overview_files(d))
         mats = sorted(f for f in os.listdir(d)
-                      if f.endswith(".md") and f not in ("index.md", "00_skeleton.md"))
-        groups = parse_groups(_read(os.path.join(w, "A_outline.md")), mats)
+                      if f.endswith(".md") and f not in skip)
+        groups = parse_groups(_read(os.path.join(w, MODEL)), mats)
         for f in os.listdir(w):
             if re.match(r"B_\d+\.md$", f):
                 os.remove(os.path.join(w, f))

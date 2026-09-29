@@ -347,6 +347,106 @@ class ArchTest(unittest.TestCase):
         got = [x for b in boxes for x in b if x.startswith(u"- **")]
         self.assertEqual(len(got), 10)
 
+    # ---- §11 訊號鏈 ---------------------------------------------------
+    def _rf(self, n=3):
+        """n 路相同通道：接頭 -C- 放大器 - 濾波器 - SPDT，SPDT 另兩腳接接頭與偵測器
+        再到接頭；放大器致能與開關控制各一條線回 FPGA（中樞）。
+
+        n=1 時 FPGA 只接兩顆零件——它仍不可被當成串在路上的一節。"""
+        parts, blocks, nets, pns = {}, {}, {"GND": []}, {}
+        parts["U9"], pns["U9"], blocks["U9"] = "FPGA_BGA", "FPGA_X", "CTRL"
+        for k in range(30):             # FPGA 一定有一大堆 I/O
+            nets["IO_%d" % k] = [("U9", "IO%d" % k)]
+        for i in range(1, n + 1):
+            j, c, a, f, sw, ja, jb, dt = ("J%d0" % i, "C%d0" % i, "U%d1" % i,
+                                          "U%d2" % i, "U%d3" % i, "J%d1" % i,
+                                          "J%d2" % i, "U%d4" % i)
+            for rd, fp, pn in ((j, "SMA_CONN", "SMA"), (c, "C_0402", None),
+                               (a, "AMP_QFN", "AMP_X"), (f, "BPF_SMD", "BPF_X"),
+                               (sw, "SW_QFN", "SPDT_X"), (ja, "SMA_CONN", "SMA"),
+                               (jb, "SMA_CONN", "SMA"), (dt, "DET_SOT", "DET_X")):
+                parts[rd], blocks[rd] = fp, "CH%d" % i
+                if pn:
+                    pns[rd] = pn
+            nets["RF_IN_%d" % i] = [(j, "1"), (c, "1")]
+            nets["N%05d" % (100 + i)] = [(c, "2"), (a, "1")]
+            nets["AMP_OUT_%d" % i] = [(a, "2"), (f, "1")]
+            nets["BPF_OUT_%d" % i] = [(f, "2"), (sw, "1")]
+            nets["SW_A_%d" % i] = [(sw, "2"), (ja, "1")]
+            nets["SW_B_%d" % i] = [(sw, "3"), (dt, "1")]
+            nets["DET_%d" % i] = [(dt, "2"), (jb, "1")]
+            nets["AMP_EN_%d" % i] = [(a, "3"), ("U9", "E%d" % i)]
+            nets["SW_CTL_%d" % i] = [(sw, "4"), ("U9", "S%d" % i)]
+            for rd in (j, a, f, sw, ja, jb, dt):
+                nets["GND"].append((rd, "9"))
+        return _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
+
+    def _topo(self, nl, bom, hier):
+        is_key = A.KeyPart(nl, bom, {}, None)
+        ep = lambda r: is_key(r) or A.ndd_classify.is_connector(nl, r)
+        return A.Topology(nl, bom, A.source_parts(hier), re.compile(r"^GND$"), ep)
+
+    def test_chain_runs_through_two_port_parts_to_branch_point(self):
+        """接頭 → 放大器 → 濾波器 → 開關：放大器、濾波器只接兩個對象，是串在
+        路上的一節；開關接三個，是分岔點，鏈停在那。隔直電容寫在兩節之間。"""
+        nl, bom, hier = self._rf(n=1)
+        chains = sorted(self._topo(nl, bom, hier).chains())
+        self.assertIn(["J10", "U11", "U12", "U13"], chains)
+        self.assertIn(["J12", "U14", "U13"], chains)
+        self.assertEqual(len(chains), 2)
+
+    def test_control_line_from_hub_does_not_cut_the_chain(self):
+        """放大器的致能接回 FPGA，不可讓它變成三個對象的分岔點——每顆有致能腳的
+        放大器都會被截斷。控制線改寫在節點旁。"""
+        nl, bom, hier = self._rf(n=3)
+        tp = self._topo(nl, bom, hier)
+        self.assertTrue(tp.passthru("U11"))
+        self.assertFalse(tp.passthru("U13"))      # 開關真的有三個 RF 對象
+        line = tp.line(["J10", "U11", "U12", "U13"])
+        self.assertIn(u"另接控制 U9", line)
+
+    def test_connector_is_always_a_chain_end(self):
+        """接頭只接兩個對象也不可被穿過——它是板子的邊界。"""
+        nl, bom, hier = self._rf(n=1)
+        tp = self._topo(nl, bom, hier)
+        for c in tp.chains():
+            self.assertNotIn(u"J", u"".join(r[0] for r in c[1:-1]))
+
+    def test_identical_chains_collapse_into_one_family(self):
+        """×3 通道的同一條鏈是一族三組，不是三條；每組 refdes 都保留。"""
+        nl, bom, hier = self._rf(n=3)
+        txt = A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None)
+        sec = txt[txt.index(u"## 11."):txt.index(u"## 12.")]
+        self.assertIn(u"×3 組同構", sec)
+        self.assertIn(u"J30 ─ U31 ─ U32 ─ U33", sec)
+        self.assertIn(u"CH#", sec)
+        self.assertEqual(sec.count(u"- **C"), 2)
+
+    def test_pack_gives_each_region_its_own_chain_instance(self):
+        """B 讀的分塊檔要寫全**自己那一組**，不是第一組；拓樸包只給全貌。"""
+        nl, bom, hier = self._rf(n=3)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
+                 out=out)
+        files = dict(A.pack(out, "B"))
+        ch2 = [v for k, v in files.items() if k.endswith("_CH2.md")][0]
+        self.assertIn(u"**J20**", ch2)
+        self.assertIn(u"本塊 1 組", ch2)
+        self.assertNotIn(u"**J10**", ch2)
+        topo = files["00_topology.md"]
+        self.assertIn(u"×3 組同構", topo)
+        self.assertIn(u"其餘 2 組", topo)
+
+    def test_bus_nets_do_not_form_chains(self):
+        """匯流排上的零件不可被當成兩兩串接。"""
+        parts, nets, pns = {}, {"BUS": [], "GND": []}, {}
+        for i in range(1, 6):
+            rd = "U%d" % i
+            parts[rd] = pns[rd] = "IC_%d" % i
+            nets["BUS"].append((rd, "1"))
+        nl, bom, hier = _board(self.tmp, parts, nets, pns=pns)
+        self.assertEqual(self._topo(nl, bom, hier).chains(), [])
+
     # ---- 沒有階層時要降級，不可爆炸 -----------------------------------
     def test_renders_without_hierarchy(self):
         parts = {"U1": "IC_A"}

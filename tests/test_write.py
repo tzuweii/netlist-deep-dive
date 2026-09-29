@@ -31,7 +31,7 @@ class WriteTest(unittest.TestCase):
         self.proj = tempfile.mkdtemp(prefix="ndd_write_")
         self.d = os.path.join(self.proj, W.PACK_DIR, "b")
         os.makedirs(self.d)
-        for f in ("index.md", "00_skeleton.md", "00_power.md",
+        for f in ("index.md", "00_skeleton.md", "00_topology.md", "00_power.md",
                   "01_A.md", "01_B.md", "02_C.md"):
             with io.open(os.path.join(self.d, f), "w", encoding="utf-8") as fh:
                 fh.write(u"內容 %s\n" % f)
@@ -66,7 +66,33 @@ class WriteTest(unittest.TestCase):
         b1 = [c for c in self.calls if u"第 1 組" in c][0]
         self.assertIn(u"<file name=\"01_B.md\">", b1)
         self.assertNotIn(u"<file name=\"02_C.md\">", b1)
-        self.assertIn(u"A_outline.md", b1)
+        self.assertIn(W.MODEL, b1)
+        # 總覽只給 A 與 C，不分給 B。
+        self.assertNotIn(u"<file name=\"00_topology.md\">", b1)
+
+    def test_a_sees_overview_and_topology(self):
+        """A 要從總覽與拓樸骨架重建架構——兩份都要附上。"""
+        W.run(self.proj, "b", stage="A", runner=self.runner, echo=lambda *a: None)
+        a = self.calls[0]
+        self.assertIn(u"<file name=\"00_skeleton.md\">", a)
+        self.assertIn(u"<file name=\"00_topology.md\">", a)
+        self.assertNotIn(u"<file name=\"01_A.md\">", a)
+
+    def test_c_gets_model_all_b_and_skeleton(self):
+        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
+        c = [x for x in self.calls if u"C 階段" in x][0]
+        for f in (u"00_skeleton.md", u"work/" + W.MODEL, u"work/B_1.md", u"work/B_2.md"):
+            self.assertIn(u"<file name=\"%s\">" % f, c)
+        self.assertNotIn(u"<file name=\"01_A.md\">", c)
+
+    def test_topology_is_not_a_b_material(self):
+        """`00_topology*.md` 只給 A 看，不在分組範圍內——A 沒分它不可報「漏分」。"""
+        with io.open(os.path.join(self.d, "00_topology_2.md"), "w",
+                     encoding="utf-8") as fh:
+            fh.write(u"續\n")
+        self.assertEqual(W.overview_files(self.d),
+                         ["00_skeleton.md", "00_topology.md", "00_topology_2.md"])
+        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
 
     def test_groups_must_cover_every_material(self):
         with self.assertRaises(W.WriteError):

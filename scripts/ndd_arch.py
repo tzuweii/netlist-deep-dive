@@ -987,7 +987,7 @@ def edge_lines(nl, bom, hier, sp, rd, pwr_rx, endpoint, where):
         if side:
             L.append(u"    - %s" % u" ↔ ".join(side))
     if E["multi"]:
-        L.append(u"  - 多點網路（見 §11）：%s" % _fam_str([n for _t, n in E["multi"]]))
+        L.append(u"  - 多點網路（見 §12）：%s" % _fam_str([n for _t, n in E["multi"]]))
     xs = E["setting"]
     if xs:
         L.append(u"  - 設定腳 %d 支：%s%s" % (
@@ -1071,6 +1071,285 @@ def multidrop_nets(nl, pwr_rx, endpoint):
         if len(set(r for r, _p in mem)) > _P2P_MAX:
             out.append((n, sorted(mem, key=lambda x: _natkey(x[0]))))
     return out
+
+
+# ----------------------------------------------------------------------
+# 訊號鏈（深層拓樸）
+# ----------------------------------------------------------------------
+
+# 接到這麼多顆主要零件以上的，算「中樞」（FPGA、GPIO 擴充、大接頭）。
+_HUB_DEG = 6
+# 非電源腳這麼多以上的也算中樞，而且**永遠不是串在路上的一節**——小板上 FPGA
+# 可能只接兩顆零件，不能因此被當成放大器那樣穿過去。
+_HUB_PINS = 24
+# 中樞只接過來這麼多條以內，視為控制線（致能、切換），不算訊號路徑的一端。
+_CTRL_MAX = 2
+
+
+class Topology(object):
+    """零件層級的拓樸：把「只有兩個對象」的零件收成鏈。
+
+    §10 是每顆零件的一跳鄰居；這裡往下追到底——一顆零件（放大器、濾波器、
+    衰減器、balun、緩衝器）只接兩個對象時是**串在路上**的一節，鏈穿過它
+    繼續走，直到碰到分岔點（開關、混頻器、功分器、FPGA）或連接器才停。
+    結果就是設計者畫在方塊圖上的那一條條鏈，只是**沒有方向**。
+
+    - 連接器、大顆零件（`_HUB_PINS` 支訊號腳以上）永遠是鏈的端點。
+    - 中樞（接 `_HUB_DEG` 顆以上，或大顆零件）只用 `_CTRL_MAX` 條以內的線接過來時，當成
+      控制線掛在節點旁，不算路徑的一端——否則每顆有致能腳的放大器都會被
+      FPGA 截斷成分岔點。
+    - 主要零件超過 `_P2P_MAX` 顆的網路是匯流排，不參與成鏈。
+    """
+
+    def __init__(self, nl, bom, sp, pwr_rx, endpoint, hpn=None):
+        self.nl, self.bom, self.sp = nl, bom, sp
+        self.hpn = hpn or {}
+        self.endpoint = endpoint
+
+        def glue(rd):
+            return (len(nl.pins(rd)) == 2 and not endpoint(rd)
+                    and not nl.is_mech(rd))
+        groups = connections(nl, pwr_rx, glue)
+        self.nets = groups
+        gid = {}
+        for i, ns in enumerate(groups):
+            for n in ns:
+                gid[n] = i
+        # 同一組裡的串聯件（串阻、隔直電容、磁珠）。
+        self.series = collections.defaultdict(set)
+        for rd in nl.parts:
+            if not glue(rd):
+                continue
+            ns = [n for n in nl.pins(rd).values() if n in gid]
+            if len(ns) == 2 and ns[0] != ns[1] and gid[ns[0]] == gid[ns[1]]:
+                self.series[gid[ns[0]]].add(rd)
+        self.members = collections.defaultdict(set)     # 組 -> {(rd, 腳)}
+        for i, ns in enumerate(groups):
+            for n in ns:
+                for r, p in nl.nets[n]:
+                    if endpoint(r):
+                        self.members[i].add((r, p))
+        self.adj = collections.defaultdict(
+            lambda: collections.defaultdict(list))      # rd -> 對象 -> [組]
+        for g, mem in self.members.items():
+            rds = set(r for r, _p in mem)
+            if len(rds) < 2 or len(rds) > _P2P_MAX:
+                continue
+            for a in rds:
+                for b in rds:
+                    if a != b:
+                        self.adj[a][b].append(g)
+        self._core = {}
+        self._big = dict((r, _sig_pins(nl, r, pwr_rx) >= _HUB_PINS)
+                         for r in self.adj)
+
+    def is_conn(self, rd):
+        return ndd_classify.is_connector(self.nl, rd)
+
+    def hub(self, rd):
+        return self._big.get(rd) or len(self.adj[rd]) >= _HUB_DEG
+
+    def ctrl(self, rd, nb):
+        """`nb` 接到 `rd` 的線是不是控制線（中樞、條數少）。"""
+        return (not self.is_conn(rd) and self.hub(nb)
+                and len(self.adj[rd][nb]) <= _CTRL_MAX)
+
+    def core(self, rd):
+        if rd not in self._core:
+            self._core[rd] = sorted(
+                (nb for nb in self.adj[rd] if not self.ctrl(rd, nb)), key=_natkey)
+        return self._core[rd]
+
+    def passthru(self, rd):
+        return (not self.is_conn(rd) and not self._big.get(rd)
+                and len(self.core(rd)) == 2)
+
+    def chains(self):
+        """-> [[refdes...]]，每條至少穿過一顆串在路上的零件；正反只留一份。"""
+        out, seen = [], set()
+        for s in sorted(self.adj, key=_natkey):
+            if self.passthru(s):
+                continue
+            for nb in self.core(s):
+                if not self.passthru(nb) or s not in self.core(nb):
+                    continue
+                path, prev, cur = [s], s, nb
+                while self.passthru(cur) and cur not in path:
+                    c = self.core(cur)
+                    if prev not in c:
+                        break
+                    path.append(cur)
+                    prev, cur = cur, (c[1] if c[0] == prev else c[0])
+                if cur in path:         # 繞回自己：環，不是鏈
+                    continue
+                path.append(cur)
+                if len(path) < 3:
+                    continue
+                k = tuple(path)
+                k = min(k, k[::-1])
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append(list(k))
+        return out
+
+    # ---- 顯示 --------------------------------------------------------
+    def label(self, rd):
+        s = _label(self.nl, self.bom, rd)
+        cat = _sp_cat(self.sp.get(rd))
+        return (u"%s〔%s〕" % (s, cat)) if cat else s
+
+    def _pin(self, rd, pins):
+        nm = [self.hpn.get((rd, p)) or p for p in sorted(pins, key=_natkey)]
+        return _fam_str(nm, 2) if len(nm) > 1 else nm[0]
+
+    def link(self, a, b):
+        """a 與 b 之間：幾條、代表網路、經過的串聯件。"""
+        gs = self.adj[a][b]
+        names, via = [], []
+        for g in gs:
+            ns = [n for n in self.nets[g] if not _RX_AUTONET.match(n)]
+            if ns:
+                names.append(sorted(ns, key=_natkey)[0])
+            via += sorted(self.series[g], key=_natkey)
+        s = (_fam_str(names, 2) if names else u"")
+        if len(gs) > 1:
+            s = (u"%d 條 %s" % (len(gs), s)).strip()
+        if via:
+            # 串聯件寫 refdes＋值：未貼的那顆是誰，交接時一定會被問。
+            s += u"（經 %s%s）" % (u"、".join(_passive_desc(self.bom, r)
+                                           for r in via[:3]),
+                                 u" 等 %d 顆" % len(via) if len(via) > 3 else u"")
+        return u" ─%s─ " % (u" %s " % s if s else u"")
+
+    def end_pins(self, rd, nb):
+        return set(p for g in self.adj[rd][nb]
+                   for r, p in self.members[g] if r == rd)
+
+    def ctrl_note(self, rd):
+        hs = sorted((nb for nb in self.adj[rd] if self.ctrl(rd, nb)), key=_natkey)
+        if not hs:
+            return u""
+        return u"［另接控制 %s］" % u"、".join(
+            u"%s ×%d" % (h, len(self.adj[rd][h])) for h in hs)
+
+    def line(self, path, where=None):
+        """一條鏈的完整寫法（含 refdes、端點腳名、串聯件、控制線、所在子電路）。"""
+        s = []
+        for i, rd in enumerate(path):
+            node = u"**%s** %s" % (rd, self.label(rd))
+            if i == 0:
+                node = u"**%s**.%s %s" % (rd, self._pin(rd, self.end_pins(rd, path[1])),
+                                          self.label(rd))
+            elif i == len(path) - 1:
+                node = u"**%s**.%s %s" % (rd, self._pin(rd, self.end_pins(rd, path[-2])),
+                                          self.label(rd))
+            else:
+                node += self.ctrl_note(rd)
+            s.append(node)
+            if i < len(path) - 1:
+                s.append(self.link(rd, path[i + 1]))
+        tail = u""
+        if where is not None:
+            locs = []
+            for rd in path:
+                w = where(rd)
+                if w not in locs:
+                    locs.append(w)
+            tail = u"　@ %s" % u" → ".join(locs)
+        return u"".join(s) + tail
+
+    def sig(self, path):
+        """同構鏈的簽章：各節料號／類別與條數。"""
+        out = []
+        for i, rd in enumerate(path):
+            out.append(self.label(rd))
+            if i < len(path) - 1:
+                out.append(len(self.adj[rd][path[i + 1]]))
+        return tuple(out)
+
+
+def chain_families(topo, where):
+    """-> [(簽章, [路徑...])]：同構的鏈收成一族（×9 通道只寫一次）。
+    正反向統一成簽章較小的那個方向。"""
+    fam = collections.OrderedDict()
+    for p in topo.chains():
+        a, b = topo.sig(p), topo.sig(p[::-1])
+        if b < a:
+            p, a = p[::-1], b
+        fam.setdefault(a, []).append(p)
+    rows = list(fam.items())
+    rows.sort(key=lambda x: (-len(x[1][0]), -len(x[1]),
+                             _natkey(x[1][0][0])))
+    return rows
+
+
+def _loc_template(paths, where):
+    """一族鏈所在子電路的共同樣式（`UC1 / CA1`…`CA9` -> `UC1 / CA#`）。"""
+    locs = []
+    for p in paths:
+        ls = []
+        for rd in p:
+            w = where(rd)
+            if w not in ls:
+                ls.append(w)
+        locs.append(u" → ".join(ls))
+    fs = name_families(locs)
+    return u"、".join(f for f, _c in fs[:3]) + (u" 等" if len(fs) > 3 else u"")
+
+
+def chain_lines(topo, fams, where, full=True, start=1):
+    """鏈族的 markdown。`full`：每一組都列 refdes（Facts、分塊材料）；
+    否則只列第一組與倍率（給 A 看全貌）。"""
+    L = []
+    for i, (_sig, ps) in enumerate(fams, start):
+        head = u"- **C%d**" % i
+        if len(ps) > 1:
+            head += u" ×%d 組同構" % len(ps)
+        head += u"（%d 節）：" % len(ps[0])
+        L.append(head + topo.line(ps[0], None))
+        L.append(u"  - 所在：%s" % _loc_template(ps, where))
+        if len(ps) > 1:
+            if full:
+                for p in ps[1:]:
+                    L.append(u"  - 同構：%s" % u" ─ ".join(p))
+            else:
+                L.append(u"  - 其餘 %d 組起點 %s" % (len(ps) - 1,
+                                                  _rng([p[0] for p in ps[1:]])))
+    return L
+
+
+def _topo_overview(topo, fams, where):
+    """給 A 看全貌的拓樸：鏈族只寫第一組與倍率，加交會點表。"""
+    L = chain_lines(topo, fams, where, full=False)
+    jn = junctions(topo, fams)
+    if jn:
+        L += [u"", u"### 鏈的交會點", u"",
+              u"| 零件 | 顆數 | 每顆接幾條鏈 | 例 |", u"|---|---|---|---|"]
+        L += [u"| %s | %d | %.1f | `%s` |" % (lab, n, avg, rd)
+              for lab, n, avg, rd in jn]
+    return L
+
+
+def junctions(topo, fams, k=25):
+    """鏈的交會點：一顆零件是幾條鏈的端點——開關、合成器、混頻器通常在這。
+    同料號收斂。-> [(標籤, 顆數, 每顆平均鏈數, 例 refdes)]"""
+    cnt = collections.Counter()
+    for _s, ps in fams:
+        for p in ps:
+            cnt[p[0]] += 1
+            cnt[p[-1]] += 1
+    by = collections.OrderedDict()
+    for rd, c in sorted(cnt.items(), key=lambda x: (-x[1], _natkey(x[0]))):
+        if c < 2:
+            continue
+        lab = topo.label(rd)
+        e = by.setdefault(lab, [0, 0, rd])
+        e[0] += 1
+        e[1] += c
+    rows = [(lab, n, float(tot) / n, rd) for lab, (n, tot, rd) in by.items()]
+    rows.sort(key=lambda x: (-x[2] * x[1], _natkey(x[0])))
+    return rows[:k]
 
 
 # ----------------------------------------------------------------------
@@ -1374,9 +1653,44 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
         L.extend(lines)
         w(u"")
 
-    # --- 11 多點網路 ----------------------------------------------------
+    # --- 11 訊號鏈 ------------------------------------------------------
     _sec(11)
-    w(u"## 11. 多點網路 `[N]`")
+    topo = Topology(nl, bom, source_parts(hier), pwr_rx, endpoint, hpn)
+    fams = chain_families(topo, where)
+    w(u"## 11. 訊號鏈：往下追到底的拓樸 `[N]` `[S]`")
+    w(u"")
+    w(u"§10 是每顆零件的一跳鄰居；這裡把它們**串起來**。只接兩個對象的主要零件"
+      u"（放大器、濾波器、衰減器、balun、緩衝器一類）是串在路上的一節，鏈穿過它"
+      u"繼續走，直到碰到分岔點（接三個以上對象的零件）或連接器才停——這就是方塊圖"
+      u"上的一條條鏈。串聯件（串阻、隔直電容、磁珠）寫在兩節之間的括號裡。"
+      u"接 %d 顆以上零件的中樞只用 %d 條以內的線接過來時，當控制線寫在節點後的"
+      u"［ ］裡，不截斷鏈。匯流排（一條網路上超過 %d 顆主要零件）不參與成鏈。"
+      u"**同構的鏈收成一族**，第一組寫全、其餘列 refdes。**沒有方向**——"
+      u"從哪端寫起只是排序。" % (_HUB_DEG, _CTRL_MAX, _P2P_MAX))
+    w(u"")
+    chains_by = []
+    if not fams:
+        w(u"（沒有穿過任何串接零件的鏈）")
+    else:
+        L.extend(chain_lines(topo, fams, where, full=True))
+        for i, (_sg, ps) in enumerate(fams, 1):
+            chains_by.append((i, [(set(p), topo.line(p, where), u" ─ ".join(p))
+                                  for p in ps]))
+        w(u"")
+        jn = junctions(topo, fams)
+        if jn:
+            w(u"**鏈的交會點**（一顆零件是幾條鏈的端點；同料號收斂）——分岔、"
+              u"合成、切換多半在這裡：")
+            w(u"")
+            w(u"| 零件 | 顆數 | 每顆接幾條鏈 | 例 |")
+            w(u"|---|---|---|---|")
+            for lab, n, avg, rd in jn:
+                w(u"| %s | %d | %.1f | `%s` |" % (lab, n, avg, rd))
+    w(u"")
+
+    # --- 12 多點網路 ----------------------------------------------------
+    _sec(12)
+    w(u"## 12. 多點網路 `[N]`")
     w(u"")
     w(u"一條網路上的主要零件超過 %d 顆（匯流排、共用致能、共用時脈）。" % _P2P_MAX)
     w(u"")
@@ -1389,9 +1703,9 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
         w(line)
     w(u"")
 
-    # --- 12 電源軌 ------------------------------------------------------
-    _sec(12)
-    w(u"## 12. 電源軌上的主要零件 `[N]` `[S]`")
+    # --- 13 電源軌 ------------------------------------------------------
+    _sec(13)
+    w(u"## 13. 電源軌上的主要零件 `[N]` `[S]`")
     w(u"")
     w(u"每條電源軌（`GND` 類除外）接到哪些主要零件。腳名是 `OUT`／`VOUT`／`SW` 一類"
       u"的粗體寫出腳名，通常就是這條軌的來源 `[?]`。軌與軌之間經串聯件"
@@ -1429,9 +1743,9 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
                     for n, ps in sorted(by.items(), key=lambda x: -len(x[1])))))
     w(u"")
 
-    # --- 13 階層 port ---------------------------------------------------
-    _sec(13)
-    w(u"## 13. 子電路的階層 port `[S]`")
+    # --- 14 階層 port ---------------------------------------------------
+    _sec(14)
+    w(u"## 14. 子電路的階層 port `[S]`")
     w(u"")
     w(u"設計者在 `.DSN` 每個子電路方塊上畫的對外接點（port 名 → 實際接到的網路）。"
       u"這是設計者自己定義的方塊邊界。")
@@ -1452,13 +1766,13 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
         w(u"（沒有階層資料）")
     w(u"")
 
-    # --- 14 待查證 ------------------------------------------------------
-    _sec(14)
-    w(u"## 14. 這份文件還不知道什麼")
+    # --- 15 待查證 ------------------------------------------------------
+    _sec(15)
+    w(u"## 15. 這份文件還不知道什麼")
     w(u"")
     w(u"**以下每一項都需要規格書或人工判斷，`init` 產不出來。**")
     w(u"")
-    w(u"- [ ] **訊號方向與功能** —— §3 只說「相連」。誰驅動誰、哪支是致能，"
+    w(u"- [ ] **訊號方向與功能** —— §3、§11 只說「相連」。誰驅動誰、哪支是致能，"
       u"要 `[D]`；鏈路用 `ndd.py trace --board %s --from <起點>` 追" % key)
     w(u"- [ ] **重複與成對代表什麼** —— 階層只說「設計者這樣切」，"
       u"沒說那是 N 個 slot、N 路通道還是主／備")
@@ -1468,6 +1782,8 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     if out is not None:
         out.update(lines=L, marks=marks, blocks=eb, multi=multi, ports=ports,
+                   chains=chains_by,
+                   topo=_topo_overview(topo, fams, where),
                    path=t.path, where=where, n_parts=len(nl.parts))
     return u"\n".join(L) + u"\n"
 
@@ -1526,11 +1842,13 @@ def _chunk(head, items, cap):
 
 
 def pack(out, header, cap=PACK_MAX):
-    """-> [(檔名, 文字)]：骨架包、電源包，加上每個分塊一份（超過 `cap` 再切）。
+    """-> [(檔名, 文字)]：骨架包、拓樸包、電源包，加上每個分塊一份（超過 `cap` 再切）。
 
-    骨架包 = §1–§9——畫方塊圖用。Facts 的開頭說明與 §14 講的是規格書與待查證，
-    不是撰寫材料，不放進來。電源包 = §12，給寫電源的那組。
-    分塊包 = 該分塊裡各子電路的 §10 邊 + 碰到它的 §11 多點網路 + 它的 §13 port。
+    骨架包 = §1–§9——組成、子電路之間的連線、介面。拓樸包 = §11 的鏈族（每族
+    只寫一組與倍率）與交會點——A 重建全板架構用。Facts 的開頭說明與 §15 講的是
+    規格書與待查證，不是撰寫材料，不放進來。電源包 = §13。
+    分塊包 = 碰到該分塊的 §11 鏈（每組都列）+ 各子電路的 §10 邊 + 碰到它的
+    §12 多點網路 + 它的 §14 port——B 逐區驗證拓樸用。
     ⚠️ 主／備、×N 的每一份都照列，不合併：P/R 是這塊板的事實，要寫出來。"""
     L, m = out["lines"], out["marks"]
     skel = ([u"# %s — 總覽" % header, u"",
@@ -1538,7 +1856,13 @@ def pack(out, header, cap=PACK_MAX):
              u"電源軌逐條見 `00_power.md`，各分塊的零件連線見同目錄其他檔。"
              u"連線一律沒有方向。", u""] + L[m[1]:m[10]])
     files = [("00_skeleton.md", u"\n".join(skel) + u"\n")]
-    pw = [u"# %s — 電源軌" % header, u""] + L[m[12]:m[13]]
+    tp = [u"# %s — 拓樸骨架" % header, u"",
+          u"> Facts §11 的鏈族：只接兩個對象的零件串成一條鏈，直到分岔點或連接器。"
+          u"每族只寫第一組與倍率，逐組 refdes 在各分塊檔。沒有方向。", u""]
+    for j, box in enumerate(_chunk(tp[:4], [(None, [x]) for x in out["topo"]], cap)):
+        files.append(((u"00_topology.md" if j == 0 else u"00_topology_%d.md" % (j + 1)),
+                      u"\n".join(box) + u"\n"))
+    pw = [u"# %s — 電源軌" % header, u""] + L[m[13]:m[14]]
     for j, box in enumerate(_chunk(pw[:2], [(None, [x]) for x in pw[2:]], cap)):
         files.append(((u"00_power.md" if j == 0 else u"00_power_%d.md" % (j + 1)),
                       u"\n".join(box) + u"\n"))
@@ -1554,9 +1878,19 @@ def pack(out, header, cap=PACK_MAX):
         order.setdefault(blk_grp.get(blk, ROOT_LABEL), []).append(blk)
     for i, (g, blks) in enumerate(order.items(), 1):
         head = [u"# %s — 分塊：%s" % (header, g), u"",
-                u"> 本塊各子電路的主要零件接到誰、碰到本塊的多點網路、本塊的階層 port。"
-                u"全板總覽見 `00_skeleton.md`。"]
+                u"> 碰到本塊的訊號鏈（每組都列）、本塊各子電路的主要零件接到誰、"
+                u"碰到本塊的多點網路、本塊的階層 port。全板總覽見 `00_skeleton.md`、"
+                u"`00_topology.md`。"]
         items = []
+        for cid, inst in out.get("chains") or ():
+            mine = [x for x in inst
+                    if any(part_grp.get(r, ROOT_LABEL) == g for r in x[0])]
+            if not mine:
+                continue
+            ls = [u"- **C%d**（全板 %d 組同構，本塊 %d 組）：%s"
+                  % (cid, len(inst), len(mine), mine[0][1])]
+            ls += [u"  - 同構：%s" % x[2] for x in mine[1:]]
+            items.append((u"## 訊號鏈", ls))
         for b in blks:
             items += [(u"### %s" % b, u) for u in _units(out["blocks"][b])]
         mine = [line for rds, line in out["multi"]
