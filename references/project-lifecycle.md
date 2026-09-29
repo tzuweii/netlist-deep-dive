@@ -41,7 +41,7 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 4. **一路跑完，中途不再停**：
 
 ```bash
-python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets] [--no-arch]
+python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
 ```
 
 `init --run`／`migrate --run` **預設不下載規格書**（要下載加 `--datasheets`），不下載時照樣產生 `datasheets/INDEX.md`。
@@ -63,9 +63,7 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
-5. **`<板>_Architecture.md` 由 init 自動寫**（見 §4），這是 init 的**預設**，
-   不必先問使用者、也不要自己加 `--no-arch`——只有使用者明說不要才加。它會呼叫
-   Claude Code CLI、每塊板約數美元（b0017 實測 5.7 美元），跑完在回報裡講用量即可。
+5. **`<板>_Architecture.md` 是 init 的一步**（見 §4），跟其他步驟一樣自動完成。
 
    ⚠️ 撰寫每塊板要數分鐘，整個 `init --run` 常超過半小時，**用背景執行**
    （Bash 的 `run_in_background`），前景指令的時間上限會把它中途砍掉。

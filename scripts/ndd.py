@@ -2794,7 +2794,7 @@ def build_parser():
     p.add_argument("--accept-mates", action="store_true", help="連同同分的對接候選一併採用")
     p.add_argument("--no-datasheets", action="store_true", help="跳過下載，只產生缺件清單")
     p.add_argument("--no-arch", action="store_true", dest="no_arch",
-                   help="不撰寫 <板>_Architecture.md（它要 Claude Code CLI 並耗 token）")
+                   help="不撰寫 <板>_Architecture.md")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init, noproj=True)
     p = sub.add_parser("pins"); p.add_argument("refdes", nargs="+"); p.set_defaults(func=cmd_pins)
@@ -2825,7 +2825,7 @@ def build_parser():
     p.add_argument("--force", action="store_true", help="覆蓋同名模型")
     p.set_defaults(func=cmd_models)
     p = sub.add_parser("facts"); p.set_defaults(func=cmd_facts)
-    p = sub.add_parser("arch", help="撰寫 <板>_Architecture.md（需 Claude Code CLI）")
+    p = sub.add_parser("arch", help="撰寫 <板>_Architecture.md")
     p.add_argument("--stage", choices=["A", "B", "C", "all"], default="all",
                    help="只跑某一階段（預設 all）")
     p.add_argument("--model", help="指定模型（預設用 claude 的預設）")
