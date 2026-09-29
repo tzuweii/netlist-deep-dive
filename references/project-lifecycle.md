@@ -63,9 +63,14 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
-5. **`<板>_Architecture.md` 由 init 自動寫**（見 §4）——要 Claude Code CLI，每塊板
-   約數美元（b0017 實測 5.7 美元）。`--no-arch` 跳過；某塊板失敗會列在 `SETUP.md`，
-   事後用 `ndd.py --board <板> arch` 補。
+5. **`<板>_Architecture.md` 由 init 自動寫**（見 §4），這是 init 的**預設**，
+   不必先問使用者、也不要自己加 `--no-arch`——只有使用者明說不要才加。它會呼叫
+   Claude Code CLI、每塊板約數美元（b0017 實測 5.7 美元），跑完在回報裡講用量即可。
+
+   ⚠️ 撰寫每塊板要數分鐘，整個 `init --run` 常超過半小時，**用背景執行**
+   （Bash 的 `run_in_background`），前景指令的時間上限會把它中途砍掉。
+
+   某塊板失敗會列在 `SETUP.md`，事後用 `ndd.py --board <板> arch` 補。
 
 ### init 自動決定與不決定的
 
