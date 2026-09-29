@@ -59,6 +59,70 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 
 ---
 
+## v2.4.0 —— `init` 自動產出以方塊圖為核心的 `Architecture.md`
+
+### `init` 最後兩步：`facts` → `architecture`
+
+| | v2.3.0 | v2.4.0 |
+|---|---|---|
+| `<板>_Architecture.md` | 腳本寫第 0 版：事實清單（重複結構、主要零件、介面、電源、未貼件、待查證） | LLM 以「原設計者交接給新人」的角度撰寫，系統方塊圖為核心，所有拓樸說明由方塊圖延伸 |
+| 事實表 | 併在 Architecture 第 0 版裡 | 獨立成 `<板>_Facts.md`（只含 `[N]`／`[B]`／`[S]`） |
+| 子指令 | `ndd.py architecture` | `ndd.py facts`（改名）、`ndd.py arch`（新增） |
+
+⚠️ **`ndd.py architecture` 已改名為 `ndd.py facts`**，舊名不再接受。
+
+- `init --run` 在 `facts` 之後逐板跑 `architecture`，**需要 Claude Code CLI**（`claude`），
+  每塊板約數美元（b0017 實測 5.7 美元）。失敗不中止，結果與 token 用量寫進
+  `SETUP.md`；`--no-arch` 跳過。
+- 撰寫依據只有 netlist、`.DSN` 階層與腳名、symbol 類別前綴、BOM——**不用規格書**，
+  正文不加 `[ ]` 標記，開頭一句交代依據並註明「本文是導覽，逐腳查證請用 `ndd.py`」。
+  規範在新增的 `references/architecture-brief.md`。
+- 方塊圖一律用 text 手繪方框圖（自動排版的 mermaid 一多節點就成線團）：總圖只畫
+  主訊號，重複結構畫一次標倍率，主／備畫成一條鏈並畫出匯合點，每張圖後接結論。
+
+### `ndd.py arch`：三階段、無工具的 `claude -p`
+
+A 方塊圖 → B 分塊（依 A 的 ```` ```groups ```` 區塊平行）→ C 組裝。每次呼叫是
+**無工具、單回合**的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，模型
+直接輸出檔案內容。`--stage A|B|C` 可從失敗的階段接著跑。
+
+b0017 實測（實際處理量，由 transcript 重算）：
+
+| 做法 | API 請求 | 輸入 token | 輸出 token |
+|---|---|---|---|
+| subagent（三階段 6 個） | 38 | 4,418,571 | 114,508 |
+| `ndd.py arch` | **6** | **351,020** | 150,049 |
+
+subagent 每次請求光系統提示與工具定義就約 5 萬 token，讀檔、寫檔、回報又各佔
+一回合、每回合整份 context 重送；無工具的 `claude -p` 固定開銷不到 1 千。
+
+### Facts：依對象收斂，撰寫材料用完即刪
+
+- §10 從逐腳列改成「邊」：同一對零件之間的多條線收成網路家族（會變的數字換成
+  `#`、不變的如 bank 號保留），只接被動件的腳依接法歸併；§12 電源軌只列零件並標出
+  輸出腳。6 塊板 Facts 合計 1.58 MB → 0.96 MB（b0017 565 KB → 313 KB）。
+- 撰寫材料 `arch_pack/<板>/`（總覽、電源、各分塊，每份 ≤ 40 KB）只在撰寫時產生，
+  **成功後連同 `work/` 草稿整包刪掉**——那是 Facts 的重複切片加上未經 C 修正的草稿，
+  留著會讓回答電路問題時 Grep 撈到。失敗時保留以便接著跑。
+
+### 對回答電路問題沒有影響
+
+查詢指令（`pins`／`net`／`part`／`trace`／`pinfn`／`coverage`／`blockers`）、
+`audit`／`mate`／`review`／`manifest`／`migrate`、所有 CSV 都沒有動，也都不讀
+Facts／Architecture。SKILL.md 回答時唯一引用的 Facts §2（重複結構）內容不變。
+
+### 既有專案怎麼升級
+
+`migrate` 不會重寫 Architecture。要新版文件：
+
+```bash
+python scripts/ndd.py --board <板> arch
+```
+
+會覆蓋既有的 `<板>_Architecture.md`（第 0 版或手改過的都會），要保留先改名。
+
+---
+
 ## v2.3.0 —— 跨板對接改直通／線束、規格書對照表、依 symbol 選封裝欄、reference 瘦身
 
 ### 跨板對接：只判斷「怎麼接」，不再枚舉排名
