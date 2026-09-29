@@ -160,8 +160,9 @@ symbol 的畫法，所以屬名字級事實）、**零件在哪個子電路**。
 
 **回答本身是主要交付物。** CSV（`pinmap_*`、`signal_chain`、`topology_hint`）與
 `hier/*.csv` 都是**可重生的衍生物**，需要時重跑、過期就丟；`models.json` 與
-`export/cis_parts.csv` 是**選用加速器不是前提**；`init` 產 `<板>_Facts.md`，
-我再依它寫 `<板>_Architecture.md`（見 `references/project-lifecycle.md` §4）。
+`export/cis_parts.csv` 是**選用加速器不是前提**；`init` 產 `<板>_Facts.md` 與
+撰寫材料，`<板>_Architecture.md` 由 `ndd.py --board <板> arch` 產生（見
+`references/project-lifecycle.md` §4）。
 其他 md 只有使用者明確要求時才產生。
 
 **原始來源是資產，結論是拋棄式的。**
