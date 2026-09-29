@@ -403,7 +403,7 @@ class ArchTest(unittest.TestCase):
         self.assertTrue(tp.passthru("U11"))
         self.assertFalse(tp.passthru("U13"))      # 開關真的有三個 RF 對象
         line = tp.line(["J10", "U11", "U12", "U13"])
-        self.assertIn(u"另接控制 U9", line)
+        self.assertIn(u"另接控制 U9 1 條", line)
 
     def test_connector_is_always_a_chain_end(self):
         """接頭只接兩個對象也不可被穿過——它是板子的邊界。"""
@@ -436,6 +436,22 @@ class ArchTest(unittest.TestCase):
         topo = files["00_topology.md"]
         self.assertIn(u"×3 組同構", topo)
         self.assertIn(u"其餘 2 組", topo)
+
+    def test_parallel_control_does_not_cut_the_chain(self):
+        """數位衰減器的 5 位元控制接到 GPIO 擴充（不是中樞）——5 條並列不是訊號
+        路徑，衰減器仍是串在路上的一節，擴充器也不可被串進鏈裡。"""
+        parts = {"J1": "SMA_CONN", "J2": "SMA_CONN", "U1": "ATT_QFN",
+                 "U2": "GPIO_QFN"}
+        pns = {"J1": "SMA", "J2": "SMA", "U1": "ATT_X", "U2": "GPIO_X"}
+        nets = {"RF_A": [("J1", "1"), ("U1", "RF1")],
+                "RF_B": [("U1", "RF2"), ("J2", "1")],
+                "GND": [("J1", "9"), ("J2", "9"), ("U1", "9"), ("U2", "9")]}
+        for k in range(5):
+            nets["ATT_P%d" % k] = [("U1", "P%d" % k), ("U2", "IO%d" % k)]
+        nl, bom, hier = _board(self.tmp, parts, nets, pns=pns)
+        tp = self._topo(nl, bom, hier)
+        self.assertEqual(tp.chains(), [["J1", "U1", "J2"]])
+        self.assertIn(u"U2 5 條", tp.line(["J1", "U1", "J2"]))
 
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""

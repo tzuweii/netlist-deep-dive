@@ -1084,6 +1084,10 @@ _HUB_DEG = 6
 _HUB_PINS = 24
 # 中樞只接過來這麼多條以內，視為控制線（致能、切換），不算訊號路徑的一端。
 _CTRL_MAX = 2
+# 訊號路徑一段最多幾條：單端 1 條、差動 2 條。超過就是數位匯流排或並列控制
+# （數位衰減器的 5 位元控制、PLL 的 SPI、DAC 的資料匯流排），掛在節點旁、
+# 不當成鏈的一段——實測 DPU 的 HMC941 因此每一顆都把 RF 鏈截斷。
+_SIG_MAX = 2
 
 
 class Topology(object):
@@ -1098,6 +1102,8 @@ class Topology(object):
     - 中樞（接 `_HUB_DEG` 顆以上，或大顆零件）只用 `_CTRL_MAX` 條以內的線接過來時，當成
       控制線掛在節點旁，不算路徑的一端——否則每顆有致能腳的放大器都會被
       FPGA 截斷成分岔點。
+    - 超過 `_SIG_MAX` 條的連線（匯流排、並列控制）同樣掛在節點旁：鏈是單端
+      或差動訊號走的路。
     - 主要零件超過 `_P2P_MAX` 顆的網路是匯流排，不參與成鏈。
     """
 
@@ -1150,9 +1156,12 @@ class Topology(object):
         return self._big.get(rd) or len(self.adj[rd]) >= _HUB_DEG
 
     def ctrl(self, rd, nb):
-        """`nb` 接到 `rd` 的線是不是控制線（中樞、條數少）。"""
-        return (not self.is_conn(rd) and self.hub(nb)
-                and len(self.adj[rd][nb]) <= _CTRL_MAX)
+        """`nb` 接到 `rd` 的線不算訊號路徑：中樞來的少數控制線，或多條並列的
+        匯流排／控制。"""
+        if self.is_conn(rd):
+            return False
+        n = len(self.adj[rd][nb])
+        return n > _SIG_MAX or (self.hub(nb) and n <= _CTRL_MAX)
 
     def core(self, rd):
         if rd not in self._core:
@@ -1231,7 +1240,7 @@ class Topology(object):
         if not hs:
             return u""
         return u"［另接控制 %s］" % u"、".join(
-            u"%s ×%d" % (h, len(self.adj[rd][h])) for h in hs)
+            u"%s %d 條" % (h, len(self.adj[rd][h])) for h in hs)
 
     def line(self, path, where=None):
         """一條鏈的完整寫法（含 refdes、端點腳名、串聯件、控制線、所在子電路）。"""
@@ -1663,10 +1672,12 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
       u"（放大器、濾波器、衰減器、balun、緩衝器一類）是串在路上的一節，鏈穿過它"
       u"繼續走，直到碰到分岔點（接三個以上對象的零件）或連接器才停——這就是方塊圖"
       u"上的一條條鏈。串聯件（串阻、隔直電容、磁珠）寫在兩節之間的括號裡。"
-      u"接 %d 顆以上零件的中樞只用 %d 條以內的線接過來時，當控制線寫在節點後的"
-      u"［ ］裡，不截斷鏈。匯流排（一條網路上超過 %d 顆主要零件）不參與成鏈。"
+      u"鏈是單端或差動訊號走的路：接 %d 顆以上零件的中樞只用 %d 條以內的線接過來"
+      u"（致能、切換），或兩顆之間超過 %d 條並列（數位控制、資料匯流排），都當"
+      u"控制寫在節點後的［ ］裡，不截斷鏈。匯流排（一條網路上超過 %d 顆主要零件）"
+      u"不參與成鏈。"
       u"**同構的鏈收成一族**，第一組寫全、其餘列 refdes。**沒有方向**——"
-      u"從哪端寫起只是排序。" % (_HUB_DEG, _CTRL_MAX, _P2P_MAX))
+      u"從哪端寫起只是排序。" % (_HUB_DEG, _CTRL_MAX, _SIG_MAX, _P2P_MAX))
     w(u"")
     chains_by = []
     if not fams:
