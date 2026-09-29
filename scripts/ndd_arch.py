@@ -1594,8 +1594,9 @@ def write_pack(pj, key, out, label, echo=print):
     return d
 
 
-def write(pj, key, missing_pn=None, echo=print, with_pack=True):
-    """產生並寫出 `<板>_Facts.md`，以及 `arch_pack/<板>/` 撰寫材料。回傳路徑。"""
+def write(pj, key, missing_pn=None, echo=print, with_pack=False):
+    """產生並寫出 `<板>_Facts.md`；`with_pack` 時另寫 `arch_pack/<板>/` 撰寫材料
+    （只有 `ndd.py arch` 要，寫完 Architecture 就刪）。回傳路徑。"""
     nl, bom = pj.load(key)
     hier = pj.hier(key)
     label = (pj.cfg["boards"][key].get("label") or key)

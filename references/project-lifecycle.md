@@ -41,14 +41,15 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 4. **一路跑完，中途不再停**：
 
 ```bash
-python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
+python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets] [--no-arch]
 ```
 
 `init --run`／`migrate --run` **預設不下載規格書**（要下載加 `--datasheets`），不下載時照樣產生 `datasheets/INDEX.md`。
 
 先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
 → `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
-→ `manifest` → `review` → `facts`，**任一步失敗不中止**，結果寫進 `SETUP.md`。
+→ `manifest` → `review` → `facts` → `architecture`（每塊板一次，見 §4），
+**任一步失敗不中止**，結果寫進 `SETUP.md`。
 
 ⚠️ **階層那一步是唯一會讓 `init` 直接中止的。** 它排在所有流程之前，因為
 `.DSN` 與 `.asc` 對不起來就代表兩份檔案不是同一塊板／同一版，**後面每一個
@@ -59,11 +60,12 @@ python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>
 formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
 **`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
 
-產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`arch_pack/<板>/`、
+產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
-5. **跑完後我接手，逐板寫 `<板>_Architecture.md`**（見 §4）——給人讀的導覽是
-   分析結論，腳本產不出來。
+5. **`<板>_Architecture.md` 由 init 自動寫**（見 §4）——要 Claude Code CLI，每塊板
+   約數美元（b0017 實測 5.7 美元）。`--no-arch` 跳過；某塊板失敗會列在 `SETUP.md`，
+   事後用 `ndd.py --board <板> arch` 補。
 
 ### init 自動決定與不決定的
 
@@ -134,17 +136,19 @@ schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界�
 **角度與寫法全部在 `references/architecture-brief.md`**——交接視角、方塊圖為核心、
 不用規格書、正文不加 `[ ]` 標記。這一節只講**怎麼派工**。
 
-**材料是 `arch_pack/<板>/`**（`init`／`ndd.py facts` 產生）：`00_skeleton.md`
+**init 會自動跑**；要重寫或補某塊板時才手動跑下面的指令。
+
+**材料是 `arch_pack/<板>/`**（每次撰寫前由 Facts 重新切出）：`00_skeleton.md`
 （組成、子電路之間的連線、介面、電源軌摘要、未貼件）、`00_power.md`（電源軌逐條），
 加上每個分塊一份（該塊主要零件接到誰——已依對象收斂、不逐腳——多點網路、
 階層 port；超過 40 KB 切成 `_1`／`_2`）。`index.md` 列各檔大小。
 主／備與 ×N 的每一份都照列，不合併。
 
-**一行指令跑完三階段，不要派 subagent：**
+**手動跑（不要派 subagent）：**
 
 ```bash
 python scripts/ndd.py --board <板> arch            # A → B（平行）→ C
-python scripts/ndd.py --board <板> arch --stage C  # 只重跑某一階段
+python scripts/ndd.py --board <板> arch --stage C  # 失敗後從壞掉的階段接著跑
 ```
 
 每次呼叫是**無工具、單回合**的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，
@@ -159,7 +163,9 @@ python scripts/ndd.py --board <板> arch --stage C  # 只重跑某一階段
 - **為什麼不用 subagent**：實測 subagent 每次請求固定開銷約 5 萬 token，讀檔、
   寫檔、回報又各佔一回合、每回合整份重送；b0017 六個 subagent 合計處理量遠超過
   材料本身。`claude -p` 無工具的固定開銷不到 1 千，一次請求就是材料送一次＋輸出一次。
-- 每階段的 token 寫進 `work/usage.json`，跑完印合計——交付時回報。
+- 用量逐階段印出，合計寫進 `SETUP.md`（init 時）——交付時回報。
+- **成功後 `arch_pack/<板>/`（含 `work/`）整包刪掉**：那是 Facts 的重複切片加上
+  未經 C 修正的草稿，留著的話回答電路問題時 Grep 會撈到。失敗時保留，好接著跑。
 - A 的分組區塊漏分、重複或檔名打錯，B 會**停下來**不替它補——重跑 `--stage A`。
 - 我自己**不讀**分塊檔與 B 的產出，讀了就把整份材料搬進主 session。
 
@@ -192,8 +198,8 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 |---|---|---|
 | **回答本身** | **主要交付物** | 每次 |
 | `<板>_Facts.md` | **板卡事實表**——人查閱用，只含 `[N]`/`[B]`/`[S]` | `init` 自動產生；`ndd.py facts` 重跑 |
-| `arch_pack/<板>/` | **撰寫材料**——Facts 切成骨架與分塊；`work/` 是各階段中間產物 | 隨 `facts` 產生；可重生 |
-| `<板>_Architecture.md` | **板卡導覽**——以方塊圖為核心的交接文件 | `init` 後跑 `ndd.py arch`（§4） |
+| `arch_pack/<板>/` | **撰寫材料**——Facts 切成骨架與分塊；`work/` 是各階段中間產物 | 撰寫時產生，成功即刪；失敗才留 |
+| `<板>_Architecture.md` | **板卡導覽**——以方塊圖為核心的交接文件 | `init` 自動產生；`ndd.py arch` 重寫（§4） |
 | 其他 md 文件 | 只有使用者明確要求時 | 明確要求 |
 | pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
 | `topology_hint.csv` | 功能說明，**不是連通** | 隨 trace 產生 |

@@ -104,6 +104,24 @@ class TestInitRun(unittest.TestCase):
             os.path.join(d, "datasheets", "INDEX.md")),
             "跳過下載時仍要產生規格書對照表")
 
+    def test_run_writes_architecture_and_leaves_no_drafts(self):
+        """init 自動產出每塊板的 Architecture.md；撰寫材料與中間稿**成功後刪光**
+        ——留著的話，之後回答電路問題 Grep refdes 會撈到未修正的草稿。"""
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        for k in cfg["boards"]:
+            self.assertTrue(os.path.exists(
+                os.path.join(d, "%s_Architecture.md" % k)), "缺 %s" % k)
+        self.assertFalse(os.path.exists(os.path.join(d, "arch_pack")))
+
+    def test_no_arch_skips_it_and_says_so(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        self.assertFalse([f for f in os.listdir(d) if f.endswith("_Architecture.md")])
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn(u"補 `<板>_Architecture.md`", txt)
+
     def test_config_has_every_field_even_when_empty(self):
         """未出現在骨架裡的欄位，使用者不會知道它存在。"""
         d = _folder()

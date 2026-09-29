@@ -28,6 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BRIEF = os.path.join(os.path.dirname(HERE), "references", "architecture-brief.md")
 WORK = "work"
 TIMEOUT = 60 * 60           # 單次呼叫上限；C 階段輸出最長，實測數分鐘
+# 測試替換 `claude -p` 用（init 的測試會一路跑到這裡，不能真的呼叫）。
+DEFAULT_RUNNER = None
 
 _RX_GROUP = re.compile(r"^\s*(\d+)\s*[:：]\s*(.+?)\s*$")
 _RX_FENCE = re.compile(r"^\s*```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.S)
@@ -119,6 +121,7 @@ def _claude():
 
 def call(prompt, cwd, model=None, runner=None):
     """-> (輸出文字, usage dict)。`runner` 給測試替換。"""
+    runner = runner or DEFAULT_RUNNER
     if runner is not None:
         return runner(prompt)
     cmd = [_claude(), "-p", "--tools", "", "--strict-mcp-config",

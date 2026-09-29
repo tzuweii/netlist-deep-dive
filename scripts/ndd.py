@@ -842,6 +842,12 @@ def cmd_init(args):
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
     _run_step("facts —— 各板事實表",
               lambda: cmd_facts(A(), pj), results)
+    if not args.no_arch:
+        for k in pj.board_keys("all"):
+            used = _run_step("architecture —— %s（claude -p）" % k,
+                             lambda k=k: _arch_board(pj, k), results)
+            if used:
+                results[-1] = (results[-1][0], "OK", used)
 
     # ---- SETUP.md ----
     pairing = "\n".join(
@@ -892,11 +898,12 @@ def cmd_init(args):
                 "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
                 "`footprint_class` / `part_class` 補一行即可（可用裸前綴整批適用）")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/INDEX.md` 標「缺」與「待確認」的列")
-    todo.append("- [ ] **寫 `<板>_Architecture.md`** —— 給人讀的板卡導覽，由 AI "
-                "跑 `ndd.py --board <板> arch` 分三階段撰寫（流程見 "
-                "`references/project-lifecycle.md` §4，規範見 "
-                "`references/architecture-brief.md`）。**腳本寫不出「這段"
-                "是什麼、訊號怎麼走」**，所以 `init` 只產事實表與撰寫材料")
+    if args.no_arch or any(n.startswith("architecture") and st != "OK"
+                           for n, st, _w in results):
+        todo.append("- [ ] **補 `<板>_Architecture.md`** —— init 沒產生或某塊板"
+                    "失敗（見上表）；跑 `ndd.py --board <板> arch`，失敗的板可用 "
+                    "`--stage` 從壞掉的階段接著跑（流程見 "
+                    "`references/project-lifecycle.md` §4）")
     todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
     todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
                 "要聚焦某條鏈請填入")
@@ -925,10 +932,10 @@ def cmd_init(args):
     print("\n" + "=" * 78)
     print("寫出 %s" % sp)
     print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md / "
-          "<板>_Facts.md"
-          "%s" % ("" if args.no_datasheets else " / datasheets/INDEX.md"))
-    print("下一步：ndd.py --board <板> arch 撰寫 <板>_Architecture.md"
-          "（references/project-lifecycle.md §4）。")
+          "<板>_Facts.md%s%s"
+          % ("" if args.no_arch else " / <板>_Architecture.md",
+             "" if args.no_datasheets else " / datasheets/INDEX.md"))
+    print("可以開始問電路問題了。")
 
 
 def cmd_pins(args, pj):
@@ -2557,6 +2564,27 @@ def cmd_facts(args, pj):
         ndd_arch.write(pj, k, missing_pn=miss or None)
 
 
+def _arch_board(pj, key, stage="all", model=None, missing_pn=None):
+    """一塊板：備材料 → A／B／C → 成功就把材料與中間稿整包刪掉。回傳用量摘要。
+
+    ⚠️ 刪掉是刻意的：`arch_pack/` 是 Facts 的重複切片，`work/` 是未經 C 修正的
+       草稿（實測 A 的草稿就有判錯的時脈來源）。留在分析資料夾裡，之後回答
+       電路問題時 Grep 一個 refdes 就會撈到它們。**失敗時保留**，好用 `--stage`
+       接著跑、也看得到壞在哪一階段。"""
+    import shutil
+    import ndd_arch
+    import ndd_write
+    ndd_arch.write(pj, key, missing_pn=missing_pn, with_pack=True)
+    log = ndd_write.run(pj.dir, key, stage=stage, model=model)
+    if stage in ("C", "all"):
+        d = os.path.join(pj.dir, ndd_arch.PACK_DIR)
+        shutil.rmtree(os.path.join(d, key), ignore_errors=True)
+        if os.path.isdir(d) and not os.listdir(d):
+            os.rmdir(d)
+    return u"輸入 %d、輸出 %d token" % (sum(u["input"] for _t, u in log),
+                                     sum(u["output"] for _t, u in log))
+
+
 def cmd_arch(args, pj):
     """撰寫 `<板>_Architecture.md`（A 方塊圖 → B 分塊 → C 組裝）。
 
@@ -2565,7 +2593,7 @@ def cmd_arch(args, pj):
     for k in pj.board_keys(args.board):
         print("== %s" % k)
         try:
-            ndd_write.run(pj.dir, k, stage=args.stage, model=args.model)
+            print("  %s" % _arch_board(pj, k, stage=args.stage, model=args.model))
         except ndd_write.WriteError as exc:
             print("!! %s" % exc)
             return 2
@@ -2765,6 +2793,8 @@ def build_parser():
     p.add_argument("--accept-pairing", action="store_true", help="確認採用自動配對")
     p.add_argument("--accept-mates", action="store_true", help="連同同分的對接候選一併採用")
     p.add_argument("--no-datasheets", action="store_true", help="跳過下載，只產生缺件清單")
+    p.add_argument("--no-arch", action="store_true", dest="no_arch",
+                   help="不撰寫 <板>_Architecture.md（它要 Claude Code CLI 並耗 token）")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init, noproj=True)
     p = sub.add_parser("pins"); p.add_argument("refdes", nargs="+"); p.set_defaults(func=cmd_pins)
