@@ -54,26 +54,34 @@ def write_hier(parts_csv, nodes_csv, parts, nets, blocks=None, pin_names=None):
     """產生與 `write_asc` 一致的兩份階層 CSV。
 
     `blocks`: {refdes: block_name} —— 把零件掛到某個 block 底下（depth 2）。
+      值也可以是 tuple（由外而內），做多層階層：`("UC1", "Common", "CA1")`。
     `pin_names`: {(refdes, pin): 功能名}。
     """
     import csv
-    blocks = blocks or {}
+    blocks = dict((k, v if isinstance(v, tuple) else (v,))
+                  for k, v in (blocks or {}).items())
     pin_names = pin_names or {}
     rows, ids, nid = [], {}, 100
-    for bname in sorted(set(blocks.values())):
+    chains = set()
+    for v in blocks.values():
+        for d in range(1, len(v) + 1):
+            chains.add(v[:d])
+    for ch in sorted(chains, key=len):
         nid += 1
-        ids[bname] = str(nid)
-        rows.append(dict(id=str(nid), parent_id="0", depth="1", refdes=bname,
-                         base_refdes="", inst_path=bname, source_part="",
+        ids[ch] = str(nid)
+        rows.append(dict(id=str(nid), parent_id=ids.get(ch[:-1], "0"),
+                         depth=str(len(ch)), refdes=ch[-1],
+                         base_refdes="", inst_path="/".join(ch), source_part="",
                          value="", footprint="", is_block="1",
-                         netlist_ignore="0", hier_path_display=bname))
+                         netlist_ignore="0", hier_path_display="/".join(ch)))
     for rd, fp in parts.items():
         nid += 1
         ids[rd] = str(nid)
         blk = blocks.get(rd)
-        ipath = "%s/%s" % (blk, rd) if blk else rd
+        ipath = "%s/%s" % ("/".join(blk), rd) if blk else rd
         rows.append(dict(id=str(nid), parent_id=ids[blk] if blk else "0",
-                         depth="2" if blk else "1", refdes=rd, base_refdes=rd,
+                         depth=str(len(blk) + 1) if blk else "1",
+                         refdes=rd, base_refdes=rd,
                          inst_path=ipath, source_part=fp, value="", footprint=fp,
                          is_block="0", netlist_ignore="0",
                          hier_path_display=ipath))

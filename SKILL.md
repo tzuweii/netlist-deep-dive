@@ -160,8 +160,9 @@ symbol 的畫法，所以屬名字級事實）、**零件在哪個子電路**。
 
 **回答本身是主要交付物。** CSV（`pinmap_*`、`signal_chain`、`topology_hint`）與
 `hier/*.csv` 都是**可重生的衍生物**，需要時重跑、過期就丟；`models.json` 與
-`export/cis_parts.csv` 是**選用加速器不是前提**；`<板>_Architecture.md` 由 `init`
-寫第 0 版、之後由人加深。其他 md 只有使用者明確要求時才產生。
+`export/cis_parts.csv` 是**選用加速器不是前提**；`init` 產 `<板>_Facts.md`，
+我再依它寫 `<板>_Architecture.md`（見 `references/project-lifecycle.md` §4）。
+其他 md 只有使用者明確要求時才產生。
 
 **原始來源是資產，結論是拋棄式的。**
 
@@ -219,7 +220,7 @@ python ndd.py trace --board <板> --from J4 --follow-mates   # 允許跨板
 ### 先找出倍率，再解釋它
 
 某顆料 ×16、×9、×81 這種倍率，通常就是系統架構的直接反映。`init` 產生的
-`<板>_Architecture.md` §2 已經把重複結構整理好了，先看那裡。
+`<板>_Facts.md` §2 已經把重複結構整理好了，先看那裡。
 
 ### 腳位功能：`[S]` 與 `[D]` 在快取裡是兩種列
 

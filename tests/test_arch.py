@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""板卡導覽（`<板>_Architecture.md`）。
+"""板卡事實表（`<板>_Facts.md`）。
 
 ⚠️ 這份文件的**唯一硬保證**是：它只含 `[N]`/`[B]`/`[S]`，**一條 `[D]` 都沒有**。
    `init` 跑到這一步時 datasheet 還沒到齊，任何腳位功能主張都是憑空捏的。
@@ -94,9 +94,112 @@ class ArchTest(unittest.TestCase):
         nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks)
         groups = A.repeat_groups(hier, nl)
         self.assertEqual(len(groups), 1)
-        blks, n = groups[0]
+        _parent, blks, n = groups[0]
         self.assertEqual(len(blks), 3)
         self.assertEqual(n, 2)          # 每組 2 顆，不是 6 也不是 0
+
+    def test_repeat_groups_found_below_top_level(self):
+        """重複結構要**遞迴往下找**。實測 9 路通道在第三層，只比頂層一組都抓不到。"""
+        parts, blocks, nets = {}, {}, {"GND": []}
+        for i in (1, 2, 3):
+            rd = "U%d" % i
+            parts[rd] = "IC_A"
+            blocks[rd] = ("UC1", "Common", "CA%d" % i)
+            nets["GND"].append((rd, "9"))
+        parts["U9"] = "IC_B"
+        blocks["U9"] = ("UC1", "Main")
+        nets["GND"].append(("U9", "9"))
+        nl, _bom, hier = _board(self.tmp, parts, nets, blocks=blocks)
+        groups = A.repeat_groups(hier, nl)
+        self.assertEqual([(p, len(b)) for p, b, _n in groups],
+                         [(("UC1", "Common"), 3)])
+
+    def test_near_identical_siblings_are_paired(self):
+        """主／備常差幾顆（實測差兩顆 0402）——要並列出來並講出差在哪。"""
+        parts, blocks, nets = {}, {}, {"GND": []}
+        for side in ("P", "R"):
+            for j in range(12):
+                rd = "U%s%d" % (side, j)
+                parts[rd] = "IC_A"
+                blocks[rd] = "Main_%s" % side
+                nets["GND"].append((rd, "9"))
+        parts["RX1"] = "R_0402"
+        blocks["RX1"] = "Main_R"
+        nets["GND"].append(("RX1", "1"))
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks)
+        txt = A.render("b", "B", nl, bom, hier, {}, None)
+        self.assertIn(u"組成幾乎相同", txt)
+        self.assertIn(u"`Main_R` 多 `R_0402` ×1", txt)
+
+    # ---- 子電路之間的連線 ---------------------------------------------
+    def _two_blocks(self, extra_parts=None, extra_nets=None, extra_blocks=None):
+        parts = {"U1": "IC_A", "U2": "IC_B", "R1": "R_0402"}
+        blocks = {"U1": "BLK_A", "U2": "BLK_B", "R1": "BLK_A"}
+        nets = {"S_A": [("U1", "1"), ("R1", "1")],
+                "S_B": [("R1", "2"), ("U2", "1")],
+                "GND": [("U1", "9"), ("U2", "9")]}
+        parts.update(extra_parts or {})
+        nets.update(extra_nets or {})
+        blocks.update(extra_blocks or {})
+        pns = dict((r, fp) for r, fp in parts.items() if r.startswith("U"))
+        return _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
+
+    def _links(self, nl, bom, hier):
+        t = A.Tree(hier, nl)
+        u = A.Units(t, bom, A.KeyPart(nl, bom, {}, None))
+        return A.block_links(nl, u, re.compile(r"^GND$"))
+
+    def test_series_resistor_counts_as_one_connection(self):
+        """U1 -R1- U2 是**一條**訊號，不是 S_A、S_B 兩條。"""
+        nl, bom, hier = self._two_blocks()
+        edges, wide = self._links(nl, bom, hier)
+        self.assertEqual(list(edges.values()), [["S_A"]])
+        self.assertEqual(wide, [])
+
+    def test_power_nets_are_not_links(self):
+        nl, bom, hier = self._two_blocks()
+        edges, _w = self._links(nl, bom, hier)
+        self.assertNotIn("GND", [n for ns in edges.values() for n in ns])
+
+    def test_passive_chain_does_not_merge_different_signals(self):
+        """兩條線各經串阻、串阻另一端又被回授電阻接在一起（運放電路）時，
+        不可把兩條併成一條——實測 I/Q 因此被算成一條。"""
+        parts = {"U1": "IC_A", "U2": "IC_B", "R1": "R_0402", "R2": "R_0402",
+                 "R3": "R_0402"}
+        blocks = {"U1": "BLK_A", "U2": "BLK_B", "R1": "BLK_A", "R2": "BLK_A",
+                  "R3": "BLK_A"}
+        nets = {"I": [("U1", "1"), ("U2", "1"), ("R1", "1")],
+                "Q": [("U1", "2"), ("U2", "2"), ("R2", "1")],
+                "X": [("R1", "2"), ("R3", "1")],
+                "Y": [("R2", "2"), ("R3", "2")],
+                "GND": [("U1", "9")]}
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks,
+                               pns={"U1": "IC_A", "U2": "IC_B"})
+        edges, _w = self._links(nl, bom, hier)
+        self.assertEqual(sorted(n for ns in edges.values() for n in ns),
+                         ["I", "Q"])
+
+    def test_loose_parts_become_one_block_per_part_number(self):
+        """不在子電路的零件依料號各成一塊，不併成「（頂層）」一大塊。"""
+        nl, bom, hier = self._two_blocks(
+            extra_parts={"U7": "IC_MUX"},
+            extra_nets={"S_C": [("U7", "1"), ("U2", "2")]})
+        edges, _w = self._links(nl, bom, hier)
+        names = [k[2] for pair in edges for k in pair if k[0] == "P"]
+        self.assertIn("IC_MUX", names)
+
+    def test_net_touching_many_blocks_is_listed_as_shared(self):
+        parts, blocks, nets = {}, {}, {"BUS": [], "GND": []}
+        for i in range(1, 5):
+            rd = "U%d" % i
+            parts[rd] = "IC_%d" % i
+            blocks[rd] = "B%d" % i
+            nets["BUS"].append((rd, "1"))
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks,
+                               pns=dict((r, fp) for r, fp in parts.items()))
+        edges, wide = self._links(nl, bom, hier)
+        self.assertEqual(edges, {})
+        self.assertEqual([n for n, _nodes in wide], ["BUS"])
 
     def test_repeat_group_range_is_natural_sorted(self):
         """`TX1 … TX16`，不是字典序的 `TX1 … TX9`。"""
@@ -109,7 +212,7 @@ class ArchTest(unittest.TestCase):
         blocks = {"U11": "BLK1", "U21": "BLK2"}
         nets = {"GND": [("U11", "9"), ("U21", "9")]}
         nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks)
-        self.assertEqual([len(b) for b, _ in A.repeat_groups(hier, nl)], [1, 1])
+        self.assertEqual(A.repeat_groups(hier, nl), [])
 
     # ---- 未貼件 -------------------------------------------------------
     def test_dni_still_detected_under_smt_only_bom(self):
@@ -163,6 +266,86 @@ class ArchTest(unittest.TestCase):
             nets["N1234567%d" % i] = [("U1", str(i + 1))]
         nl, _b, _h = _board(self.tmp, {"U1": "IC_A"}, nets)
         self.assertEqual(A.net_families(nl, re.compile(r"^GND$", re.I)), [])
+
+    # ---- §10 依對象收斂 -----------------------------------------------
+    def test_template_keeps_constant_digits(self):
+        """會變的數字才換成 `#`——bank 號 227 在每條上都一樣，要留著。"""
+        self.assertEqual(A._template(["FPGA_227_RX0_N", "FPGA_227_RX1_N"]),
+                         "FPGA_227_RX#_N")
+        self.assertEqual(A.name_families(["D0", "D1", "D2", "CLK"]),
+                         [("CLK", 1), ("D#", 3)])
+
+    def _bus(self, n):
+        parts = {"U1": "IC_A", "U2": "IC_B"}
+        nets = {"GND": [("U1", "99"), ("U2", "99")]}
+        for i in range(n):
+            nets["D_%d" % i] = [("U1", str(i + 1)), ("U2", str(i + 1))]
+        return _board(self.tmp, parts, nets,
+                      pns={"U1": "IC_A", "U2": "IC_B"})
+
+    def test_many_pins_to_one_part_collapse_to_one_edge(self):
+        """同一對零件之間 16 條線是**一條邊**，不是 16 行。"""
+        nl, bom, _h = self._bus(16)
+        L = A.edge_lines(nl, bom, None, {}, "U1", re.compile(r"^GND$"),
+                         lambda r: r.startswith("U"), lambda r: u"X")
+        txt = u"\n".join(L)
+        self.assertIn(u"16 條", txt)
+        self.assertIn(u"`D_#` ×16", txt)
+        self.assertLess(len(L), 5)
+
+    def test_few_pins_are_listed_individually(self):
+        nl, bom, _h = self._bus(2)
+        L = A.edge_lines(nl, bom, None, {}, "U1", re.compile(r"^GND$"),
+                         lambda r: r.startswith("U"), lambda r: u"X")
+        self.assertIn(u"`D_0`", u"\n".join(L))
+        self.assertIn(u"`D_1`", u"\n".join(L))
+
+    def test_passive_summary_groups_same_wiring(self):
+        """串阻 refdes 不同、去處網路不同，接法相同就算一種；去處零件不同要分開。"""
+        s = A.passive_summary([
+            ("1", u"R1 R_100ohm → `BANK65_3V3_J25`"),
+            ("2", u"R2 R_100ohm → `BANK67_1V8_B20`"),
+            ("3", u"R3 R_1K → J3.D14"),
+            ("4", u"R4 R_1K → J4.D14")])
+        self.assertIn(u"×2 支同接法", s)
+        self.assertIn(u"J3.D14", s)
+        self.assertIn(u"J4.D14", s)
+
+    # ---- 撰寫材料切包 -------------------------------------------------
+    def test_pack_keeps_every_redundant_copy(self):
+        """主／備每一份都要進包——P/R 是這塊板的事實，不可合併成「以 P 為例」。"""
+        parts, blocks, nets = {}, {}, {"GND": []}
+        for i, side in ((1, "P"), (2, "R")):
+            a, b = "U%d1" % i, "U%d2" % i
+            parts[a], parts[b] = "IC_A", "IC_B"
+            blocks[a] = blocks[b] = "Main_%s" % side
+            nets["S_%s" % side] = [(a, "1"), (b, "1")]
+        pns = dict((r, fp) for r, fp in parts.items())
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {}, None, out=out)
+        files = dict(A.pack(out, "B"))
+        self.assertIn("00_skeleton.md", files)
+        self.assertIn("00_power.md", files)
+        body = u"".join(v for k, v in files.items() if not k.startswith("00_"))
+        self.assertIn(u"S_P", body)
+        self.assertIn(u"S_R", body)
+        # 骨架包是撰寫材料，不帶 Facts 的規格書說明與待查證清單。
+        self.assertNotIn(u"這份文件還不知道什麼", files["00_skeleton.md"])
+        self.assertNotIn(u"[D]", files["00_skeleton.md"].split(u"## 1.")[0])
+
+    def test_pack_splits_at_part_boundary_under_cap(self):
+        """超過上限就切檔，切點在零件之間；每份都帶小節標題，零件一顆不少。"""
+        head = [u"# H", u""]
+        items = [(u"### BLK", [u"- **U%d**" % i, u"  - " + u"x" * 300])
+                 for i in range(10)]
+        boxes = A._chunk(head, items, 1024)
+        self.assertGreater(len(boxes), 1)
+        for b in boxes:
+            self.assertIn(u"### BLK", b)
+            self.assertLessEqual(sum(len(x.encode("utf-8")) + 1 for x in b), 1024)
+        got = [x for b in boxes for x in b if x.startswith(u"- **")]
+        self.assertEqual(len(got), 10)
 
     # ---- 沒有階層時要降級，不可爆炸 -----------------------------------
     def test_renders_without_hierarchy(self):

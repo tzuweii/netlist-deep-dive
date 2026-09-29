@@ -48,7 +48,7 @@ python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>
 
 先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
 → `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
-→ `manifest` → `review`，**任一步失敗不中止**，結果寫進 `SETUP.md`。
+→ `manifest` → `review` → `facts`，**任一步失敗不中止**，結果寫進 `SETUP.md`。
 
 ⚠️ **階層那一步是唯一會讓 `init` 直接中止的。** 它排在所有流程之前，因為
 `.DSN` 與 `.asc` 對不起來就代表兩份檔案不是同一塊板／同一版，**後面每一個
@@ -59,10 +59,11 @@ python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>
 formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
 **`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
 
-產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、
+產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`arch_pack/<板>/`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
-5. **跑完後我接手寫架構文件** —— 那是分析結論，腳本產不出來。
+5. **跑完後我接手，逐板寫 `<板>_Architecture.md`**（見 §4）——給人讀的導覽是
+   分析結論，腳本產不出來。
 
 ### init 自動決定與不決定的
 
@@ -128,30 +129,46 @@ schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界�
 
 ---
 
-## 4. 寫架構文件
+## 4. 寫架構文件（`<板>_Architecture.md`）
 
-**`init` 已經產生 `<板>_Architecture.md` 的第 0 版**——那份只含不需要規格書就
-能斷言的事實（重複結構、主要零件、對外介面、電源、訊號家族、未貼件），並在
-§8 列出它還不知道什麼。**這一階段是把 §8 一條條消掉**，不是從零開始寫。
+**角度與寫法全部在 `references/architecture-brief.md`**——交接視角、方塊圖為核心、
+不用規格書、正文不加 `[ ]` 標記。這一節只講**怎麼派工**。
 
-**md 解釋「為什麼」，CSV 回答「是什麼」，稽核確認兩者一致。** 不要把逐腳資料
-抄進 md。第 0 版刻意不寫任何 `[D]` 級主張（那時 datasheet 還沒到齊），
-**加深的內容要自己帶出處**。
+**材料是 `arch_pack/<板>/`**（`init`／`ndd.py facts` 產生）：`00_skeleton.md`
+（組成、子電路之間的連線、介面、電源軌摘要、未貼件）、`00_power.md`（電源軌逐條），
+加上每個分塊一份（該塊主要零件接到誰——已依對象收斂、不逐腳——多點網路、
+階層 port；超過 40 KB 切成 `_1`／`_2`）。`index.md` 列各檔大小。
+主／備與 ×N 的每一份都照列，不合併。
 
-文件開頭必備：
+**一行指令跑完三階段，不要派 subagent：**
 
 ```bash
-python scripts/ndd.py manifest    # 產生 MANIFEST.md
+python scripts/ndd.py --board <板> arch            # A → B（平行）→ C
+python scripts/ndd.py --board <板> arch --stage C  # 只重跑某一階段
 ```
 
-- 引用 manifest（含 `.asc` / BOM / datasheet / **`ndd.json`** 的完整 SHA-256
-  與工具版本）而不是手打版本號——`ndd.json` 裡的 `mate_map`、`part_package`、
-  `net_normalize` 每一項都會改變結論
-- 一句「逐腳查詢請用 CSV / `ndd.py`，不要靠本文」
-- 書寫慣例：**每個 refdes 後面一律附料號**
+每次呼叫是**無工具、單回合**的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，
+模型直接輸出檔案內容。
 
-每寫一條可機械驗證的主張，就在 `ndd.json` 的 `assertions` 補一條。
-寫完跑 `audit`，**首次執行的 FAIL 就是文件的錯**，改文件而不是改斷言。
+| 階段 | 幾次呼叫 | 附上的材料 | 寫 |
+|---|---|---|---|
+| A 方塊圖 | 1 | `index.md` + `00_skeleton.md` | `arch_pack/<板>/work/A_outline.md` |
+| B 分塊 | A 大綱 ```` ```groups ```` 區塊的組數，平行 | `A_outline.md` + 該組分塊檔 | `work/B_<組號>.md` |
+| C 組裝 | 1 | `A_outline.md` + 全部 `B_*.md` | `<板>_Architecture.md` |
+
+- **為什麼不用 subagent**：實測 subagent 每次請求固定開銷約 5 萬 token，讀檔、
+  寫檔、回報又各佔一回合、每回合整份重送；b0017 六個 subagent 合計處理量遠超過
+  材料本身。`claude -p` 無工具的固定開銷不到 1 千，一次請求就是材料送一次＋輸出一次。
+- 每階段的 token 寫進 `work/usage.json`，跑完印合計——交付時回報。
+- A 的分組區塊漏分、重複或檔名打錯，B 會**停下來**不替它補——重跑 `--stage A`。
+- 我自己**不讀**分塊檔與 B 的產出，讀了就把整份材料搬進主 session。
+
+C 完成後我補兩件事：
+
+- 跑 `python scripts/ndd.py manifest`，在文件開頭引用 `MANIFEST.md`（輸入檔與
+  `ndd.json` 的 SHA-256），不手打版本號
+- 選用：文件裡可機械驗證的主張（「U20 接到 J3 共 55 條」）補進 `ndd.json` 的
+  `assertions`，跑 `audit`；**首次 FAIL 就是文件的錯**，改文件不改斷言
 
 ---
 
@@ -174,7 +191,9 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 | 東西 | 定位 | 何時產生 |
 |---|---|---|
 | **回答本身** | **主要交付物** | 每次 |
-| `<板>_Architecture.md` | **板卡導覽**——`init` 寫第 0 版，之後由人加深 | `init` 自動產生 |
+| `<板>_Facts.md` | **板卡事實表**——人查閱用，只含 `[N]`/`[B]`/`[S]` | `init` 自動產生；`ndd.py facts` 重跑 |
+| `arch_pack/<板>/` | **撰寫材料**——Facts 切成骨架與分塊；`work/` 是各階段中間產物 | 隨 `facts` 產生；可重生 |
+| `<板>_Architecture.md` | **板卡導覽**——以方塊圖為核心的交接文件 | `init` 後跑 `ndd.py arch`（§4） |
 | 其他 md 文件 | 只有使用者明確要求時 | 明確要求 |
 | pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
 | `topology_hint.csv` | 功能說明，**不是連通** | 隨 trace 產生 |

@@ -165,7 +165,7 @@ pin-existence 對 ≠ 封裝對；byte-identical 回寫對階層錯誤**完全�
 
 ## B4 衍生物看起來正常，不代表仍對應目前來源
 
-CSV、`hier/*.csv`、pin cache、`<板>_Architecture.md` 都是衍生物，可能來自不同
+CSV、`hier/*.csv`、pin cache、`<板>_Facts.md`／`_Architecture.md` 都是衍生物，可能來自不同
 時間的來源。stale data 不是亂碼，是**上一版的正確答案**——比 corrupted data
 難察覺得多。過期的階層不會有任何症狀，只會安靜地把零件放錯子電路。
 **誰擋著**：只有 `pinfn`（datasheet SHA-256 不符會重抽）。`MANIFEST.md`

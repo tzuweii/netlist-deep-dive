@@ -840,8 +840,8 @@ def cmd_init(args):
                          lambda: cmd_blockers(A(), pj), results)
     _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
-    _run_step("architecture —— 各板導覽（第 0 版）",
-              lambda: cmd_architecture(A(), pj), results)
+    _run_step("facts —— 各板事實表",
+              lambda: cmd_facts(A(), pj), results)
 
     # ---- SETUP.md ----
     pairing = "\n".join(
@@ -892,9 +892,11 @@ def cmd_init(args):
                 "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
                 "`footprint_class` / `part_class` 補一行即可（可用裸前綴整批適用）")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/INDEX.md` 標「缺」與「待確認」的列")
-    todo.append("- [ ] **把 `<板>_Architecture.md` 加深** —— `init` 已經寫好"
-                "第 0 版（只含不需要規格書的事實），把它的 §8「還不知道什麼」"
-                "一條條消掉；**腳本永遠寫不出「為什麼這樣設計」**")
+    todo.append("- [ ] **寫 `<板>_Architecture.md`** —— 給人讀的板卡導覽，由 AI "
+                "跑 `ndd.py --board <板> arch` 分三階段撰寫（流程見 "
+                "`references/project-lifecycle.md` §4，規範見 "
+                "`references/architecture-brief.md`）。**腳本寫不出「這段"
+                "是什麼、訊號怎麼走」**，所以 `init` 只產事實表與撰寫材料")
     todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
     todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
                 "要聚焦某條鏈請填入")
@@ -923,9 +925,10 @@ def cmd_init(args):
     print("\n" + "=" * 78)
     print("寫出 %s" % sp)
     print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md / "
-          "<板>_Architecture.md"
+          "<板>_Facts.md"
           "%s" % ("" if args.no_datasheets else " / datasheets/INDEX.md"))
-    print("可以開始問電路問題了，或接著把各板的 _Architecture.md 加深。")
+    print("下一步：ndd.py --board <板> arch 撰寫 <板>_Architecture.md"
+          "（references/project-lifecycle.md §4）。")
 
 
 def cmd_pins(args, pj):
@@ -2534,12 +2537,12 @@ def cmd_review(args, pj):
     print("寫出 %s" % p)
 
 
-def cmd_architecture(args, pj):
-    """各板導覽 `<板>_Architecture.md`——`init` 當下寫得出來的那一半。
+def cmd_facts(args, pj):
+    """各板事實表 `<板>_Facts.md`——寫 `<板>_Architecture.md` 的材料。
 
     **刻意只含 `[N]`/`[B]`/`[S]`。** 這是設計上的保證不是自律：跑到這一步
     時 datasheet 才剛盤點完（多半還沒到齊），腳位功能一類的 `[D]` 級主張
-    沒有材料可寫。第 0 版之後由人接手加深。
+    沒有材料可寫。給人讀的導覽由 AI 讀這份再撰寫。
     """
     import ndd_arch
     ddir = os.path.join(pj.dir,
@@ -2552,6 +2555,20 @@ def cmd_architecture(args, pj):
         miss = int(m.group(1)) if m else 0
     for k in pj.board_keys(args.board):
         ndd_arch.write(pj, k, missing_pn=miss or None)
+
+
+def cmd_arch(args, pj):
+    """撰寫 `<板>_Architecture.md`（A 方塊圖 → B 分塊 → C 組裝）。
+
+    每次呼叫是無工具、單回合的 `claude -p`，材料直接放進訊息——見 `ndd_write`。"""
+    import ndd_write
+    for k in pj.board_keys(args.board):
+        print("== %s" % k)
+        try:
+            ndd_write.run(pj.dir, k, stage=args.stage, model=args.model)
+        except ndd_write.WriteError as exc:
+            print("!! %s" % exc)
+            return 2
 
 
 def _import_symbols(pj):
@@ -2777,7 +2794,12 @@ def build_parser():
     p.add_argument("--add", nargs="+", metavar="名稱", help="把範例複製進專案（all = 全部）")
     p.add_argument("--force", action="store_true", help="覆蓋同名模型")
     p.set_defaults(func=cmd_models)
-    p = sub.add_parser("architecture"); p.set_defaults(func=cmd_architecture)
+    p = sub.add_parser("facts"); p.set_defaults(func=cmd_facts)
+    p = sub.add_parser("arch", help="撰寫 <板>_Architecture.md（需 Claude Code CLI）")
+    p.add_argument("--stage", choices=["A", "B", "C", "all"], default="all",
+                   help="只跑某一階段（預設 all）")
+    p.add_argument("--model", help="指定模型（預設用 claude 的預設）")
+    p.set_defaults(func=cmd_arch)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)
     p = sub.add_parser("coverage"); p.set_defaults(func=cmd_coverage)
     p = sub.add_parser("blockers"); p.set_defaults(func=cmd_blockers)
