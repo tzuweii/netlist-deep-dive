@@ -86,10 +86,36 @@ def prompt_b(board, d, n, files):
 
 
 def prompt_c(board, d, bnames):
+    """C 只讀 A 的模型與 B 的驗證結果——不再吃任何 Facts 切片。"""
     return (u"板名：%s。你是 **C 階段**。依系統提示的「C 階段」要求，輸出 "
             u"`%s_Architecture.md` 的完整內容。\n\n%s"
-            % (board, board, _attach(["00_skeleton.md", WORK + "/" + MODEL]
-                                     + bnames, d)))
+            % (board, board, _attach([WORK + "/" + MODEL] + bnames, d)))
+
+
+_RX_STAGES = re.compile(r"^<!--\s*stages:\s*(.*?)\s*-->\s*$")
+
+
+def brief_for(stage, text=None):
+    """brief 裡只取這個階段用得到的節：`## ` 節標題下的 `stages` 註記列出階段；
+    `each` 表示該節裡只取 `### <階段>` 那一小節。沒有註記的節每個階段都送。"""
+    text = text if text is not None else _read(BRIEF)
+    parts = re.split(r"(?m)^(?=## )", text)
+    out = [parts[0]]
+    for sec in parts[1:]:
+        lines = sec.split(u"\n")
+        tag = _RX_STAGES.match(lines[1]) if len(lines) > 1 else None
+        if not tag:
+            out.append(sec)
+            continue
+        body = u"\n".join([lines[0]] + lines[2:])
+        want = tag.group(1).split()
+        if want == ["each"]:
+            subs = re.split(r"(?m)^(?=### )", body)
+            mine = [x for x in subs[1:] if x.startswith(u"### %s " % stage)]
+            out.append(subs[0] + u"".join(mine))
+        elif stage in want:
+            out.append(body)
+    return u"".join(out)
 
 
 def parse_groups(outline, available):
@@ -137,14 +163,16 @@ def _claude():
     return exe
 
 
-def call(prompt, cwd, model=None, runner=None):
-    """-> (輸出文字, usage dict)。`runner` 給測試替換。"""
+def call(prompt, cwd, model=None, runner=None, system=None):
+    """-> (輸出文字, usage dict)。`runner` 給測試替換。`system` 是這個階段的
+    brief（`brief_for`）；沒給就送整份。"""
     runner = runner or DEFAULT_RUNNER
     if runner is not None:
         return runner(prompt)
     cmd = [_claude(), "-p", "--tools", "", "--strict-mcp-config",
-           "--no-session-persistence",
-           "--output-format", "json", "--system-prompt-file", BRIEF]
+           "--no-session-persistence", "--output-format", "json"]
+    cmd += (["--system-prompt", system] if system
+            else ["--system-prompt-file", BRIEF])
     if model:
         cmd += ["--model", model]
     r = subprocess.run(cmd, input=prompt.encode("utf-8"), cwd=cwd,
@@ -187,7 +215,7 @@ def run(proj_dir, board, stage="all", model=None, runner=None, echo=print):
     log = []
 
     def one(tag, prompt, out):
-        txt, u = call(prompt, w, model, runner)
+        txt, u = call(prompt, w, model, runner, system=brief_for(tag[0]))
         _write(out, strip_fence(txt))
         echo(u"  %s：輸入 %d、輸出 %d token → %s" % (tag, u["input"], u["output"],
                                                  os.path.basename(out)))

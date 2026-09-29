@@ -1839,7 +1839,8 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     if out is not None:
         out.update(lines=L, marks=marks, blocks=eb, multi=multi, ports=ports,
-                   chains=chains_by,
+                   chains=chains_by, tree=t, nl=nl, bom=bom, hpn=hpn,
+                   pwr_rx=pwr_rx, label=topo.label,
                    topo=_topo_overview(topo, fams, where),
                    path=t.path, where=where, n_parts=len(nl.parts))
     return u"\n".join(L) + u"\n"
@@ -1924,6 +1925,7 @@ def pack(out, header, cap=PACK_MAX):
         files.append(((u"00_power.md" if j == 0 else u"00_power_%d.md" % (j + 1)),
                       u"\n".join(box) + u"\n"))
     grp = pack_groups(out["path"], out["n_parts"])
+    diffs = pair_diffs(out, grp)
     # 子電路路徑字串 -> 分塊；用零件反查，因為 §10 標題就是 where(rd)。
     blk_grp = {}
     part_grp = {}
@@ -1934,6 +1936,23 @@ def pack(out, header, cap=PACK_MAX):
     for blk in out["blocks"]:
         order.setdefault(blk_grp.get(blk, ROOT_LABEL), []).append(blk)
     for i, (g, blks) in enumerate(order.items(), 1):
+        if g in diffs:
+            ref, lines = diffs[g]
+            head = [u"# %s — 分塊：%s（與 %s 的差異）" % (header, g, ref), u"",
+                    u"> 腳本已把本塊每一顆零件對應到 `%s` 的某一顆（依料號、footprint、"
+                    u"鄰居結構，不看 refdes），逐腳比對接法。**這裡只列不同處**："
+                    u"未列出的零件與接法都和 `%s` 相同，讀那份材料再用下面的位號"
+                    u"對應換成本塊的 refdes。" % (ref, ref), u""]
+            items = [(None, [x]) for x in lines]
+            pts = [line for b, line in out["ports"]
+                   if b == g or b.startswith(g + u" / ")]
+            items += [(u"## 階層 port", [x]) for x in pts]
+            boxes = _chunk(head, items, cap)
+            for j, box in enumerate(boxes):
+                fn = (u"%02d_%s.md" % (i, _slug(g))) if len(boxes) == 1 else \
+                    (u"%02d_%s_%d.md" % (i, _slug(g), j + 1))
+                files.append((fn, u"\n".join(box) + u"\n"))
+            continue
         head = [u"# %s — 分塊：%s" % (header, g), u"",
                 u"> 碰到本塊的訊號鏈（每組都列）、本塊各子電路的主要零件接到誰、"
                 u"碰到本塊的多點網路、本塊的階層 port。全板總覽見 `00_skeleton.md`、"
@@ -1961,6 +1980,34 @@ def pack(out, header, cap=PACK_MAX):
             fn = (u"%02d_%s.md" % (i, _slug(g))) if len(boxes) == 1 else                 (u"%02d_%s_%d.md" % (i, _slug(g), j + 1))
             files.append((fn, u"\n".join(box) + u"\n"))
     return files
+
+
+def pair_diffs(out, grp):
+    """-> {R 分塊名: (P 分塊名, [差異行])}。沒有成對子電路或沒有結構時回空。"""
+    t = out.get("tree")
+    if t is None or not t.kids.get(()):
+        return {}
+    import ndd_pair
+    nl, bom, pwr_rx = out["nl"], out["bom"], out["pwr_rx"]
+    prs = ndd_pair.pairs(t, grp)
+    if not prs:
+        return {}
+    mt = ndd_pair.Matcher(nl, bom, lambda n: _is_power(n, pwr_rx),
+                          lambda n: Fabric.cls(n) == "GND")
+    m = {}
+    # 大的先配（DPU／DPU1 的 FPGA 先對上，UC 那側的外部鄰居才換得了名字）。
+    prs.sort(key=lambda x: -len(t.sub[x[2]]))
+    # 兩輪：第一輪各對自己配，第二輪帶著全部的對應再配一次——DPU 的隔直電容
+    # 另一端在 SW，SW 那對要先配好，電容才分得出誰是誰。
+    for _ in range(2):
+        for _gp, _gr, a, b in prs:
+            m.update(mt.match(t.sub[a], t.sub[b], anchor=m))
+    res = {}
+    for gp, gr, a, b in prs:
+        res[gr] = (gp, ndd_pair.diff_lines(mt, out["hpn"], set(t.sub[a]),
+                                           set(t.sub[b]), m, out["label"],
+                                           out["where"]))
+    return res
 
 
 def write_pack(pj, key, out, label, echo=print):

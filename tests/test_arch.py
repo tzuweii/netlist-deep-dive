@@ -327,7 +327,8 @@ class ArchTest(unittest.TestCase):
 
     # ---- 撰寫材料切包 -------------------------------------------------
     def test_pack_keeps_every_redundant_copy(self):
-        """主／備每一份都要進包——P/R 是這塊板的事實，不可合併成「以 P 為例」。"""
+        """主／備每一份都要進包——P/R 是這塊板的事實，不可合併成「以 P 為例」。
+        R 側以「對應表＋差異」的形式進包，一顆都不能漏。"""
         parts, blocks, nets = {}, {}, {"GND": []}
         for i, side in ((1, "P"), (2, "R")):
             a, b = "U%d1" % i, "U%d2" % i
@@ -343,10 +344,48 @@ class ArchTest(unittest.TestCase):
         self.assertIn("00_power.md", files)
         body = u"".join(v for k, v in files.items() if not k.startswith("00_"))
         self.assertIn(u"S_P", body)
-        self.assertIn(u"S_R", body)
+        # R 側改送差異：每一顆都要對應到 P 側，不可消失。
+        r = [v for k, v in files.items() if k.endswith("_Main_R.md")][0]
+        self.assertIn(u"與 Main_P 的差異", r)
+        self.assertIn(u"U21→U11", r)
+        self.assertIn(u"U22→U12", r)
         # 骨架包是撰寫材料，不帶 Facts 的規格書說明與待查證清單。
         self.assertNotIn(u"這份文件還不知道什麼", files["00_skeleton.md"])
         self.assertNotIn(u"[D]", files["00_skeleton.md"].split(u"## 1.")[0])
+
+    def test_pair_diff_reports_swapped_throws(self):
+        """主備的 SPDT 兩擲對調：零件對得起來（鄰居集合相同），逐腳比對要報出來；
+        R 側多一顆未貼電阻要列在「只在一側」。"""
+        parts, blocks, nets, pns = {}, {}, {"GND": []}, {}
+        for side, base in (("P", 10), ("R", 20)):
+            j, mx, sw, amp = ("J%d" % base, "U%d" % (base + 1),
+                              "U%d" % (base + 2), "U%d" % (base + 3))
+            for rd, fp in ((j, "SMA_CONN"), (mx, "MIX_QFN"), (sw, "SW_QFN"),
+                           (amp, "AMP_QFN")):
+                parts[rd], blocks[rd], pns[rd] = fp, "Main_%s" % side, fp
+                nets["GND"].append((rd, "9"))
+            for k in range(8):                    # 旁路電容：成對判定要 ≥10 顆
+                c = "C%d%d" % (base, k)
+                parts[c], blocks[c] = "C_0402", "Main_%s" % side
+                nets["GND"].append((c, "2"))
+                nets.setdefault("VDD_%s" % side, []).append((c, "1"))
+            ext, mix = ("1", "2") if side == "P" else ("2", "1")
+            nets["EXT_%s" % side] = [(j, "1"), (sw, ext)]
+            nets["MIX_%s" % side] = [(mx, "1"), (sw, mix)]
+            nets["OUT_%s" % side] = [(sw, "3"), (amp, "1")]
+        parts["R99"], blocks["R99"] = "R_0402", "Main_R"
+        nets["OUT_R"].append(("R99", "1"))
+        nets["GND"].append(("R99", "2"))
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^(GND|VDD)"},
+                 None, out=out)
+        r = [v for k, v in A.pack(out, "B") if k.endswith("_Main_R.md")][0]
+        self.assertIn(u"U22→U12", r)
+        sec = r[r.index(u"## 接法不同的腳"):r.index(u"## 料號或貼件不同")]
+        self.assertIn(u"**U22**（P：U12）", sec)
+        self.assertIn(u"P 接 J10.1；R 接 U11.1", sec)
+        self.assertIn(u"R99", r[r.index(u"## 只在一側"):])
 
     def test_pack_splits_at_part_boundary_under_cap(self):
         """超過上限就切檔，切點在零件之間；每份都帶小節標題，零件一顆不少。"""

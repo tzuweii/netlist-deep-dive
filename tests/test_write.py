@@ -78,12 +78,65 @@ class WriteTest(unittest.TestCase):
         self.assertIn(u"<file name=\"00_topology.md\">", a)
         self.assertNotIn(u"<file name=\"01_A.md\">", a)
 
-    def test_c_gets_model_all_b_and_skeleton(self):
+    def test_c_reads_only_model_and_b(self):
+        """C 只讀 A 模型與 B 驗證結果，不再吃任何 Facts 切片（連總覽都不讀）。"""
         W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
         c = [x for x in self.calls if u"C 階段" in x][0]
-        for f in (u"00_skeleton.md", u"work/" + W.MODEL, u"work/B_1.md", u"work/B_2.md"):
+        for f in (u"work/" + W.MODEL, u"work/B_1.md", u"work/B_2.md"):
             self.assertIn(u"<file name=\"%s\">" % f, c)
-        self.assertNotIn(u"<file name=\"01_A.md\">", c)
+        for f in (u"00_skeleton.md", u"00_topology.md", u"01_A.md"):
+            self.assertNotIn(u"<file name=\"%s\">" % f, c)
+
+    def test_brief_is_cut_per_stage(self):
+        """每次呼叫只帶該階段用得到的節：B 不帶寫法原則、C 不帶材料說明，
+        三階段一節只留自己那小節。"""
+        brief = u"""# 規範
+
+## 目標
+<!-- stages: A B C -->
+目標內容
+
+## 材料
+<!-- stages: A B -->
+材料內容
+
+## 寫法
+<!-- stages: C -->
+寫法內容
+
+## 三階段
+<!-- stages: each -->
+開頭
+
+### A —— 重建
+A 內容
+
+### B —— 驗證
+B 內容
+
+### C —— 寫
+C 內容
+
+## 輸出
+<!-- stages: A B C -->
+輸出內容
+"""
+        b = W.brief_for("B", brief)
+        self.assertIn(u"目標內容", b)
+        self.assertIn(u"材料內容", b)
+        self.assertNotIn(u"寫法內容", b)
+        self.assertIn(u"B 內容", b)
+        self.assertNotIn(u"A 內容", b)
+        self.assertNotIn(u"C 內容", b)
+        self.assertIn(u"輸出內容", b)
+        self.assertNotIn(u"stages:", b)
+        c = W.brief_for("C", brief)
+        self.assertNotIn(u"材料內容", c)
+        self.assertIn(u"寫法內容", c)
+        # 真正的 brief 每一段都要帶標記（漏標會變成每階段都送）。
+        real = io.open(W.BRIEF, encoding="utf-8").read()
+        for sec in real.split(u"\n## ")[1:]:
+            self.assertIn(u"<!-- stages:", sec.split(u"\n")[1], sec[:20])
 
     def test_topology_is_not_a_b_material(self):
         """`00_topology*.md` 只給 A 看，不在分組範圍內——A 沒分它不可報「漏分」。"""
