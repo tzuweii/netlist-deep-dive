@@ -468,6 +468,33 @@ def connections(nl, pwr_rx, glue):
     for a, b in links:
         if deg[a] == 1 and deg[b] == 1:
             parent[find(a)] = find(b)
+    # 連續兩三顆串聯（隔直電容接 0 Ω、兩段串阻）：中間那條網路上**只有**這兩顆
+    # 黏著件，照樣是同一條訊號。但兩端若碰到同一顆零件就不併——那是回授網路
+    # （同一顆運放的兩支腳），不是串聯。
+    via = collections.defaultdict(list)
+    for a, b in links:
+        via[a].append(b)
+        via[b].append(a)
+    mem = {}
+
+    def members(root):
+        if root not in mem:
+            mem[root] = set(r for n in parent if find(n) == root
+                            for r, _p in nl.nets[n] if not glue(r))
+        return mem[root]
+    for m in sorted(via, key=_natkey):
+        ends = via[m]
+        if len(ends) != 2 or len(nl.nets[m]) != 2:
+            continue
+        ra, rb, rm = find(ends[0]), find(ends[1]), find(m)
+        if len(set((ra, rb, rm))) < 2:
+            continue
+        if members(ra) & members(rb):
+            continue
+        u = members(ra) | members(rb) | members(rm)
+        parent[ra] = rm
+        parent[rb] = rm
+        mem[find(m)] = u      # 被併掉的根不會再被 find 回來，舊快取不用清
     groups = collections.defaultdict(list)
     for n in parent:
         groups[find(n)].append(n)
@@ -1088,6 +1115,9 @@ _CTRL_MAX = 2
 # （數位衰減器的 5 位元控制、PLL 的 SPI、DAC 的資料匯流排），掛在節點旁、
 # 不當成鏈的一段——實測 DPU 的 HMC941 因此每一顆都把 RF 鏈截斷。
 _SIG_MAX = 2
+# 差動對的兩條算一路：`VINA_I_P_DPU1`／`VINA_I_N_DPU1`、`DATACLKINP`／`DATACLKINN`。
+# 只在同一段裡 P、N 都在時才併——這塊板的 `_P` 也可能是 Primary。
+_RX_PN = re.compile(r"(?<=[A-Z0-9_])(P|N)(?=_|$)")
 
 
 class Topology(object):
@@ -1161,7 +1191,23 @@ class Topology(object):
         if self.is_conn(rd):
             return False
         n = len(self.adj[rd][nb])
-        return n > _SIG_MAX or (self.hub(nb) and n <= _CTRL_MAX)
+        return self.width(rd, nb) > _SIG_MAX or (self.hub(nb) and n <= _CTRL_MAX)
+
+    def width(self, rd, nb):
+        """rd 與 nb 之間有幾路訊號：差動對算一路。"""
+        names = []
+        for g in self.adj[rd][nb]:
+            ns = sorted(self.nets[g], key=_natkey)
+            names.append(ns[0].upper())
+        by = collections.defaultdict(set)
+        for n in names:
+            for m in _RX_PN.finditer(n):
+                by[n[:m.start()] + u"#" + n[m.end():]].add((m.group(1), n))
+        paired = set()
+        for k, v in by.items():
+            if set(x for x, _n in v) == {u"P", u"N"}:
+                paired |= set(n for _x, n in v)
+        return len(names) - len(paired) // 2
 
     def core(self, rd):
         if rd not in self._core:

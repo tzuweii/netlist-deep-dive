@@ -179,6 +179,20 @@ class ArchTest(unittest.TestCase):
         self.assertEqual(sorted(n for ns in edges.values() for n in ns),
                          ["I", "Q"])
 
+    def test_two_series_parts_in_a_row_are_one_connection(self):
+        """隔直電容再接 0 Ω 到 ADC：中間那條網路只有兩顆串聯件，仍是一條訊號。"""
+        parts = {"U1": "IC_A", "U2": "IC_B", "C1": "C_0402", "R1": "R_0402"}
+        blocks = {"U1": "BLK_A", "U2": "BLK_B", "C1": "BLK_A", "R1": "BLK_A"}
+        nets = {"OUT": [("U1", "1"), ("C1", "1")],
+                "MID": [("C1", "2"), ("R1", "1")],
+                "AIN": [("R1", "2"), ("U2", "1")],
+                "GND": [("U1", "9"), ("U2", "9")]}
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks,
+                               pns={"U1": "IC_A", "U2": "IC_B"})
+        edges, _w = self._links(nl, bom, hier)
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(len(list(edges.values())[0]), 1)
+
     def test_loose_parts_become_one_block_per_part_number(self):
         """不在子電路的零件依料號各成一塊，不併成「（頂層）」一大塊。"""
         nl, bom, hier = self._two_blocks(
@@ -452,6 +466,35 @@ class ArchTest(unittest.TestCase):
         tp = self._topo(nl, bom, hier)
         self.assertEqual(tp.chains(), [["J1", "U1", "J2"]])
         self.assertIn(u"U2 5 條", tp.line(["J1", "U1", "J2"]))
+
+    def test_differential_pairs_count_as_one_path(self):
+        """雙通道 VGA：I、Q 各一對差動進、各一對差動出到 ADC。差動對算一路，
+        所以它有三個對象（兩顆 balun、ADC），是分岔點——不可把 I 與 Q 串成
+        同一條鏈。"""
+        parts = {"U3": "BALUN_SMD", "U4": "BALUN_SMD", "U1": "VGA_QFN",
+                 "U2": "ADC_BGA"}
+        pns = {"U3": "BALUN_X", "U4": "BALUN_X", "U1": "VGA_X", "U2": "ADC_X"}
+        nets = {"GND": [(r, "99") for r in parts]}
+        for ch, m in (("I", "U3"), ("Q", "U4")):
+            for pol in ("P", "N"):
+                nets["VIN_%s_%s" % (ch, pol)] = [(m, pol), ("U1", "IN%s%s" % (ch, pol))]
+                nets["VOUT_%s_%s" % (ch, pol)] = [("U1", "OUT%s%s" % (ch, pol)),
+                                                  ("U2", "AIN%s%s" % (ch, pol))]
+        nl, bom, hier = _board(self.tmp, parts, nets, pns=pns)
+        tp = self._topo(nl, bom, hier)
+        self.assertEqual(tp.width("U1", "U3"), 1)
+        self.assertEqual(tp.width("U1", "U2"), 2)
+        self.assertFalse(tp.passthru("U1"))
+
+    def test_primary_suffix_alone_is_not_a_pair(self):
+        """`_P` 在這類設計裡也是 Primary；沒有對應的 `_N` 就不併。"""
+        parts = {"U1": "IC_A", "U2": "IC_B"}
+        nets = {"SW_CA0_P": [("U1", "1"), ("U2", "1")],
+                "SW_CA1_P": [("U1", "2"), ("U2", "2")],
+                "GND": [("U1", "9"), ("U2", "9")]}
+        nl, bom, hier = _board(self.tmp, parts, nets,
+                               pns={"U1": "IC_A", "U2": "IC_B"})
+        self.assertEqual(self._topo(nl, bom, hier).width("U1", "U2"), 2)
 
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""
