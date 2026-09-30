@@ -16,8 +16,8 @@
 > 資料夾裡已有 `ndd.json` = 已建過專案，**不要跑 `init`**（工具會擋）。
 > 升級既有專案照 `UPGRADING.md` 做。
 
-1. 每塊板**三份**：`.DSN` + `.asc` + BOM，丟進同一個資料夾。**缺任何一份就先問，
-   不要開始。** 三份都是使用者主動提供的——工具不會去找、不會去猜、也不會少一份
+1. 每塊板**三份**：`.DSN` + `.asc` + BOM，丟進同一個資料夾。**缺任何一份就告訴
+   使用者缺什麼，不要開始。** 三份都是使用者主動提供的——工具不會去找、不會去猜、也不會少一份
    就降級跑。三份要是**同一版設計**：netlist 匯出之後線路圖又改過，兩份各自正確
    卻對不上，`init` 會在對帳時停下來。
 
@@ -33,32 +33,26 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 會印出三件事：netlist ↔ BOM 配對（**用 refdes 交集，不用檔名猜**）、連接器對接
 候選與判定依據、datasheet 盤點。
 
-3. **只有兩件事要問使用者**，用 `AskUserQuestion` 一次問完：
-
-   - **BOM 配對** —— 只在 `--plan` 標「需你確認」時問，附候選清單
-   - **datasheet** —— 下載還是跳過（跳過仍會產生缺件清單）
+3. **init 只問使用者一件事**：用 `AskUserQuestion` 問 **datasheet 要下載還是跳過**
+   （跳過仍會產生缺件清單）。其他一律不問、不自行決定。
 
 4. **一路跑完，中途不再停**：
 
 ```bash
-python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
+python scripts/ndd.py init "C:/path/to/analysis" --run     [--no-datasheets]
 ```
 
-`init --run` **預設下載規格書**，使用者選跳過才加 `--no-datasheets`；`migrate --run`
-預設不下載（要下載加 `--datasheets`）。不下載時照樣產生 `datasheets/INDEX.md`。
+使用者選跳過才加 `--no-datasheets`；**除此之外不加任何旗標。**
 
-⚠️ **旗標只照上一步的答案加，不要自己多加。** 尤其 `--no-arch`（不寫
-`<板>_Architecture.md`）**只有使用者明說不要 Architecture 時才加**——它是 init 的
-一部分，不是可省的選項；不要因為要花 token、要啟動 `claude -p` 就自行跳過。
-（每塊板一次無工具的 `claude -p`，約 1 分鐘、2–3 萬 token，見步驟 5；那是設計好
-的步驟，不是巢狀 agent。）
+`--plan` 或 `--run` 報「BOM 配對信心不足」時 init 會停下來——那和 `.DSN` 對帳不過
+一樣是**檔案問題，不是選項**：把訊息與候選清單原樣轉給使用者，照使用者的指示處理。
 
 先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
 → `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
 → `manifest` → `review` → `facts` → `architecture`（每塊板一次，見 §4），
 **任一步失敗不中止**，結果寫進 `SETUP.md`。
 
-⚠️ **階層那一步是唯一會讓 `init` 直接中止的。** 它排在所有流程之前，因為
+⚠️ **只有 BOM 配對與階層對帳會讓 `init` 直接中止。** 兩者都排在所有流程之前，因為
 `.DSN` 與 `.asc` 對不起來就代表兩份檔案不是同一塊板／同一版，**後面每一個
 結論都會建立在錯的基礎上而不會有任何症狀**。看到它停下來，先釐清檔案版本，
 不要想辦法繞過。
@@ -71,8 +65,7 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
 5. **`<板>_Architecture.md` 是 init 的最後一步**（見 §4），在 `facts` 之後逐板自動
-   接力產出，不用另外下指令：每塊板一次 `claude -p`，約 1 分鐘、2–3 萬 token，
-   用量與秒數記在 `SETUP.md` 的步驟表。
+   接力產出，不用另外下指令。
 
    ⚠️ 整個 `init --run`（含規格書下載與每塊板的 Architecture）仍可能超過前景指令的
    時間上限，**用背景執行**（Bash 的 `run_in_background`）。
@@ -88,7 +81,7 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 | `.DSN` → 階層 CSV | ✅ | 自動找 `SPB_*`（取版本最高）；找不到 Capture 就**中止** |
 | 階層與 `.asc` 對帳 | ✅ | 逐條比 net／節點／零件；**任何不一致都中止**，不是警告 |
 | symbol 腳位名入庫 | ✅ | 同料號腳位名不一致時**不寫入**，列出來等人釐清 |
-| netlist ↔ BOM 配對 | ✅ | refdes 命中率 ≥ 90% 且領先次佳 ≥ 30%；否則**停下來問** |
+| netlist ↔ BOM 配對 | ✅ | refdes 命中率 ≥ 90% 且領先次佳 ≥ 30%；否則**中止** |
 | `bom_scope` | ✅ | 檔名含 `SMT` → `smt_only`，否則 `complete` |
 | `mates` | ✅ | 腳數 ≥ 8；公母直接對接：實體大小相同、直通語意相符 ≥ 4 且多於矛盾；線束：訊號腳全部靠名稱唯一對上且 ≥ 4 支 |
 | `mates`（兩側都有同分候選） | ❌ | **netlist 真的分不出來**，列進 `SETUP.md` 等人決定 |
@@ -98,9 +91,6 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 
 ⚠️ **`net_normalize` 對對接判定是決定性的。** 實測同一組 40-pin 連接器：沒有
 規則時 16 vs 16（判不出來），有規則時 36 vs 32（定案）。填好後重跑 `mate`。
-
-6. 用 **AskUserQuestion** 問清楚：這些板子怎麼組成一台？有沒有線束？
-   **不要自己猜拓樸。**
 
 ---
 
@@ -158,16 +148,13 @@ python scripts/ndd.py --board <板> arch
 **一次**無工具、單回合的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，模型
 直接輸出檔案內容。材料取自完整版 Facts，在記憶體裡算、不落地：§1–§9（子電路樹與每區主要零件及
 symbol 類別、子電路之間的連線、跨區零件、I2C、介面、電源軌摘要、未貼件、訊號家族）
-加 §11 訊號鏈族摘要。實測 7–22 KB，b0017 一次約輸入 1.8 萬、輸出 0.7 萬 token。
+加 §11 訊號鏈族摘要。
 
 - 逐顆零件的接線（§10）、逐條電源軌、多點網路**不給**——那是查證用的細節，不是
   畫系統方塊需要的；文件要讀者用 `ndd.py` 查。
-- **留在資料夾的 `<板>_Facts.md` 是精簡版**（§1–§9 與待查證，8–20 KB，腳本算出、沒有 LLM 判讀；依規則算出的節標「推算」，只當線索）。
-  完整版（逐顆零件接到誰、訊號鏈…）數十到數百 KB，翻資料夾時會被整份讀進來，
+- **留在資料夾的 `<板>_Facts.md` 是精簡版**（§1–§9 與待查證，腳本算出、沒有 LLM
+  判讀；依規則算出的節標「推算」，只當線索）。完整版（逐顆零件接到誰、訊號鏈…）
   不落地；要時 `ndd.py facts --full`。
-- **為什麼不用 subagent**：subagent 每次請求固定開銷約 5 萬 token；無工具的
-  `claude -p` 不到 1 千。
-- 用量印在終端機，init 時寫進 `SETUP.md`——交付時回報。
 
 寫完後我補兩件事：
 

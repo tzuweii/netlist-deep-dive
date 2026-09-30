@@ -442,7 +442,7 @@ def _plan(d):
                                                    len(r["nl"].nets)))
         print("       -> %s  命中率 %.0f%%（次佳 %.0f%%）  %s"
               % (r["bom"] or "(無)", r["ratio"] * 100, r["second"] * 100,
-                 "OK" if r["ok"] else "!! 需你確認"))
+                 "OK" if r["ok"] else "!! 信心不足"))
         if not r["ok"]:
             need_ask.append(r)
             for ratio, hit, tot, x in r["candidates"]:
@@ -481,7 +481,7 @@ def _plan(d):
     else:
         fab = Fabric(boards, [], {}, None, [])
         acc, amb, rej = _detect_mates(fab, boards)
-        print("  自動定案 %d 組、**需你確認** %d 組、排除 %d 組"
+        print("  自動定案 %d 組、兩側同分 %d 組（列進 SETUP.md 待辦）、排除 %d 組"
               % (len(acc), len(amb), len(rej)))
         for r in acc[:10]:
             print("     OK  %s <-> %s (%d pin)" % (r["a"], r["b"], r["pins"]))
@@ -516,14 +516,14 @@ def _plan(d):
     print("  自動下載只對少數原廠站有效，其餘要人工補。")
 
     print("\n" + "-" * 78)
-    print("需要你決定：")
-    print("  1. BOM 配對 —— %s"
-          % ("全部高信心，無需確認" if not need_ask
-             else "%d 塊板需確認：%s" % (len(need_ask),
-                                        ", ".join(r["key"] for r in need_ask))))
-    print("  2. datasheet —— 要下載還是跳過（跳過仍會產生 INDEX.md 對照表）")
-    print("\n決定後執行：ndd.py init <資料夾> --run [--bom key=檔名]... "
-          "[--no-datasheets]")
+    if need_ask:
+        print("!! BOM 配對信心不足：%s —— `--run` 會停下來。這是檔案問題，"
+              "把上面的候選清單轉給使用者，照使用者的指示處理。"
+              % ", ".join(r["key"] for r in need_ask))
+    print("只需要問使用者一件事：datasheet 要下載還是跳過"
+          "（跳過仍會產生 INDEX.md 對照表）。")
+    print("\n執行：ndd.py init <資料夾> --run [--no-datasheets]"
+          "（使用者選跳過才加；不加其他旗標）")
     return rows, acc, amb, rej, skipped
 
 
@@ -760,8 +760,9 @@ def cmd_init(args):
     unresolved = [r for r in rows if not r["ok"]]
     if unresolved and not args.accept_pairing:
         raise SystemExit(
-            "以下板子的 BOM 配對信心不足，**必須先確認**：%s\n"
-            "  用 --bom <key>=<檔名> 指定，或確認後加 --accept-pairing。\n"
+            "以下板子的 BOM 配對信心不足，init 停止：%s\n"
+            "  這是檔案問題，把候選清單轉給使用者，照使用者的指示處理。\n"
+            "  使用者指定了 BOM 才用 --bom <key>=<檔名>；使用者確認採用自動配對才加 --accept-pairing。\n"
             "  先跑 `ndd.py init %s --plan` 看候選清單。"
             % (", ".join(r["key"] for r in unresolved), args.dir))
 

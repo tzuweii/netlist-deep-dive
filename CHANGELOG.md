@@ -119,9 +119,12 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
   跨區零件、SCL 掛載、電源軌、連接器／主動件分類、「幾乎相同」的配對、主要零件
   挑選）。後者保留——是最接近架構的資訊——但節標題標「（推算）」，檔頭與 SKILL.md
   寫明規則可能算錯、只當線索，引用前用 `ndd.py` 查證。
-- `project-lifecycle.md`：`init --run` 的旗標只照使用者的答案加，`--no-arch` 只有
-  使用者明說不要 Architecture 才加（實測有代理人為了省 token 自行加上）；修正規格書
-  下載預設值的描述（`init` 預設下載、`migrate` 預設不下載）。
+- init 只問使用者一件事：datasheet 要不要下載。指令只寫 `init --run [--no-datasheets]`，
+  不加其他旗標（實測有代理人自行加 `--no-arch` 跳過 Architecture）。BOM 配對信心不足
+  改為和 `.DSN` 對帳不過一樣的中止，把訊息轉給使用者，不再列為要問的選項；拿掉 init
+  後「問板子怎麼組成」那一步。`--plan` 輸出同步。
+- `project-lifecycle.md` 拿掉與執行 init 無關的用量、大小、秒數與設計理由說明；修正
+  規格書下載預設值（`init` 預設下載、`migrate` 預設不下載）。
 - 每份 Architecture 第一行由程式寫入「LLM 判讀、未經查證、不可當證據引用」；
   SKILL.md 規定回答電路問題不引用它的方向、角色或結論。
 - SKILL.md 找倍率仍指向 `<板>_Facts.md` §2（v2.3.0 指向第 0 版 Architecture §2）。
