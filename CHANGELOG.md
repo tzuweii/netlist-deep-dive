@@ -104,6 +104,13 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
   改為待確認；spacehub 主分配樹正確，但仍把校正樹那頭的 `J1` 誤當主輸入——被動
   樹的方向只憑腳名與網路名仍會錯。
 
+### Facts 不留在分析資料夾
+
+`init` 不再寫 `<板>_Facts.md`；`arch` 在記憶體裡算同一份材料，寫完 Architecture 後
+把舊版留下的 Facts 一併刪除。它數十到數百 KB（b0017 315 KB）、不是給人讀的，留在
+分析資料夾裡，之後回答電路問題時 LLM 翻資料夾會整份讀進來，也可能已過期。
+`ndd.py facts` 保留，需要時手動產生。
+
 ### 中途試過、最後拿掉的
 
 在 b0017 上實跑過「A 重建架構 → B 逐區驗證 → C 寫文件」與主備差異檔（腳本逐顆

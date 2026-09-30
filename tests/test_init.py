@@ -116,22 +116,28 @@ class TestInitRun(unittest.TestCase):
                 os.path.join(d, "%s_Architecture.md" % k)), "缺 %s" % k)
         self.assertFalse(os.path.exists(os.path.join(d, "arch_pack")))
 
-    def test_architecture_step_keeps_facts_intact_and_reports_usage(self):
-        """architecture 這步會重寫 Facts——缺件數要和 facts 那步一樣帶進去；
+    def test_init_leaves_no_facts_and_reports_usage(self):
+        """Facts 不落地：init 跑完分析資料夾裡沒有 `<板>_Facts.md`（它大、不是給人
+        讀的，留著會被翻資料夾的 LLM 整份讀進來）；舊版留下的也要刪掉。
         SETUP.md 記下每塊板的用量。"""
         d = _folder()
+        stale = os.path.join(d, "board_a_Facts.md")
+        with io.open(stale, "w", encoding="utf-8") as fh:
+            fh.write(u"舊版 Facts\n")
         ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
-        idx = io.open(os.path.join(d, "datasheets", "INDEX.md"),
-                      encoding="utf-8").read()
-        miss = int(re.search(r"<!-- missing: (\d+) -->", idx).group(1))
+        self.assertFalse([f for f in os.listdir(d) if f.endswith("_Facts.md")])
         cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
         setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
         for k in cfg["boards"]:
-            facts = io.open(os.path.join(d, "%s_Facts.md" % k),
-                            encoding="utf-8").read()
-            if miss:
-                self.assertIn(u"缺 %d 份規格書" % miss, facts)
+            self.assertTrue(os.path.exists(
+                os.path.join(d, "%s_Architecture.md" % k)))
             self.assertRegex(setup, u"architecture —— %s（claude -p）\\s+OK.*token" % k)
+
+    def test_facts_command_still_writes_on_demand(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        ndd.main(["--config", os.path.join(d, "ndd.json"), "facts"])
+        self.assertTrue([f for f in os.listdir(d) if f.endswith("_Facts.md")])
 
     def test_no_arch_skips_it_and_says_so(self):
         d = _folder()

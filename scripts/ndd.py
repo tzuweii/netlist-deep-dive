@@ -840,8 +840,8 @@ def cmd_init(args):
                          lambda: cmd_blockers(A(), pj), results)
     _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
-    _run_step("facts —— 各板事實表",
-              lambda: cmd_facts(A(), pj), results)
+    # Facts 不落地：architecture 在記憶體裡算材料，寫完 Architecture 就好。
+    # 要看 Facts 時手動跑 `ndd.py facts`。
     if not args.no_arch:
         for k in pj.board_keys("all"):
             used = _run_step("architecture —— %s（claude -p）" % k,
@@ -930,8 +930,7 @@ def cmd_init(args):
         fh.write(txt)
     print("\n" + "=" * 78)
     print("寫出 %s" % sp)
-    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md / "
-          "<板>_Facts.md%s%s"
+    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md%s%s"
           % ("" if args.no_arch else " / <板>_Architecture.md",
              "" if args.no_datasheets else " / datasheets/INDEX.md"))
     print("可以開始問電路問題了。")
@@ -2544,7 +2543,8 @@ def cmd_review(args, pj):
 
 
 def cmd_facts(args, pj):
-    """各板事實表 `<板>_Facts.md`——寫 `<板>_Architecture.md` 的材料。
+    """各板事實表 `<板>_Facts.md`——手動查閱用；init 不產生（`arch` 在記憶體裡算
+    同一份內容當材料，不落地）。
 
     **刻意只含 `[N]`/`[B]`/`[S]`。** 這是設計上的保證不是自律：跑到這一步
     時 datasheet 才剛盤點完（多半還沒到齊），腳位功能一類的 `[D]` 級主張
@@ -2568,25 +2568,31 @@ def _missing_pn(pj):
 
 
 def _arch_board(pj, key, model=None):
-    """一塊板：寫 Facts → 一次 `claude -p` 寫 Architecture。回傳用量摘要。
+    """一塊板：在記憶體裡算 Facts 的材料 → 一次 `claude -p` 寫 Architecture。
+    回傳用量摘要。
 
-    Facts 會重寫一次（材料要從同一次 render 取），所以缺件數要照 `facts` 那一步
-    一樣帶進去——漏帶的話，init 跑完 Facts 最後一節的「缺 N 份規格書」會不見。"""
+    ⚠️ **Facts 不落地，成功後舊的 `<板>_Facts.md` 也刪掉。** 它數十到數百 KB、
+       不是給人讀的；留在分析資料夾裡，之後回答電路問題時 LLM 翻資料夾會整份
+       讀進來，也可能是舊版。要看時手動跑 `ndd.py facts`。"""
     import time
     import ndd_arch
     import ndd_write
     t0 = time.time()
     out = {}
-    ndd_arch.write(pj, key, missing_pn=_missing_pn(pj) or None, out=out)
+    ndd_arch.write(pj, key, out=out, save=False)
     u = ndd_write.run(pj.dir, key, ndd_arch.material(out, out["label"]),
                       model=model)
+    old = os.path.join(pj.dir, "%s_Facts.md" % key)
+    if os.path.isfile(old):
+        os.remove(old)
     return u"輸入 %d、輸出 %d token，%d 秒" % (u["input"], u["output"],
                                           time.time() - t0)
 
 
 def cmd_arch(args, pj):
-    """撰寫 `<板>_Architecture.md`：Facts 的全板部分＋訊號鏈摘要，一次無工具的
-    `claude -p` 寫成以系統方塊圖為核心的交接文件——見 `ndd_write`。"""
+    """撰寫 `<板>_Architecture.md`：Facts 的全板部分＋訊號鏈摘要（在記憶體裡算，
+    不落地），一次無工具的 `claude -p` 寫成以系統方塊圖為核心的交接文件——見
+    `ndd_write`。"""
     import ndd_write
     for k in pj.board_keys(args.board):
         print("== %s" % k)

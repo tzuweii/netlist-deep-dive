@@ -1927,9 +1927,9 @@ def material(out, label):
     return u"\n".join(body) + u"\n"
 
 
-def write(pj, key, missing_pn=None, echo=print, out=None):
-    """產生並寫出 `<板>_Facts.md`，回傳路徑。`out` 給 dict 時填入 `material()`
-    要用的結構（`ndd.py arch` 用）。"""
+def write(pj, key, missing_pn=None, echo=print, out=None, save=True):
+    """產生 `<板>_Facts.md`，回傳路徑（`save=False` 時不寫檔、回傳 None）。
+    `out` 給 dict 時填入 `material()` 要用的結構（`ndd.py arch` 用）。"""
     nl, bom = pj.load(key)
     hier = pj.hier(key)
     label = (pj.cfg["boards"][key].get("label") or key)
@@ -1942,6 +1942,8 @@ def write(pj, key, missing_pn=None, echo=print, out=None):
     out = {} if out is None else out
     txt = render(key, label, nl, bom, hier, pj.cfg, cis, missing_pn, out=out)
     out["label"] = label
+    if not save:
+        return None
     p = os.path.join(pj.dir, "%s_Facts.md" % key)
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(txt)
