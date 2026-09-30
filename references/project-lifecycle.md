@@ -44,7 +44,14 @@ python scripts/ndd.py init "C:/path/to/analysis" --plan
 python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>]... [--accept-pairing] [--accept-mates] [--no-datasheets]
 ```
 
-`init --run`／`migrate --run` **預設不下載規格書**（要下載加 `--datasheets`），不下載時照樣產生 `datasheets/INDEX.md`。
+`init --run` **預設下載規格書**，使用者選跳過才加 `--no-datasheets`；`migrate --run`
+預設不下載（要下載加 `--datasheets`）。不下載時照樣產生 `datasheets/INDEX.md`。
+
+⚠️ **旗標只照上一步的答案加，不要自己多加。** 尤其 `--no-arch`（不寫
+`<板>_Architecture.md`）**只有使用者明說不要 Architecture 時才加**——它是 init 的
+一部分，不是可省的選項；不要因為要花 token、要啟動 `claude -p` 就自行跳過。
+（每塊板一次無工具的 `claude -p`，約 1 分鐘、2–3 萬 token，見步驟 5；那是設計好
+的步驟，不是巢狀 agent。）
 
 先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
 → `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`

@@ -2793,7 +2793,7 @@ def build_parser():
     p.add_argument("--accept-mates", action="store_true", help="連同同分的對接候選一併採用")
     p.add_argument("--no-datasheets", action="store_true", help="跳過下載，只產生缺件清單")
     p.add_argument("--no-arch", action="store_true", dest="no_arch",
-                   help="不撰寫 <板>_Architecture.md")
+                   help="不撰寫 <板>_Architecture.md（只在使用者明說不要時用）")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init, noproj=True)
     p = sub.add_parser("pins"); p.add_argument("refdes", nargs="+"); p.set_defaults(func=cmd_pins)
