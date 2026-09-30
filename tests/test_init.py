@@ -116,28 +116,40 @@ class TestInitRun(unittest.TestCase):
                 os.path.join(d, "%s_Architecture.md" % k)), "缺 %s" % k)
         self.assertFalse(os.path.exists(os.path.join(d, "arch_pack")))
 
-    def test_init_leaves_no_facts_and_reports_usage(self):
-        """Facts 不落地：init 跑完分析資料夾裡沒有 `<板>_Facts.md`（它大、不是給人
-        讀的，留著會被翻資料夾的 LLM 整份讀進來）；舊版留下的也要刪掉。
-        SETUP.md 記下每塊板的用量。"""
+    def test_init_writes_compact_facts_and_reports_usage(self):
+        """init 留下的 `<板>_Facts.md` 是精簡版：只有全板事實（§1–§9 與待查證），
+        不含逐顆零件接到誰（§10）——完整版數十到數百 KB，會被翻資料夾的 LLM 整份
+        讀進來。舊版留下的完整版要被覆蓋。缺件數要帶進去；SETUP.md 記下用量。"""
         d = _folder()
         stale = os.path.join(d, "board_a_Facts.md")
         with io.open(stale, "w", encoding="utf-8") as fh:
-            fh.write(u"舊版 Facts\n")
+            fh.write(u"## 10. 舊版完整 Facts\n")
         ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
-        self.assertFalse([f for f in os.listdir(d) if f.endswith("_Facts.md")])
+        idx = io.open(os.path.join(d, "datasheets", "INDEX.md"),
+                      encoding="utf-8").read()
+        miss = int(re.search(r"<!-- missing: (\d+) -->", idx).group(1))
         cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
         setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
         for k in cfg["boards"]:
+            facts = io.open(os.path.join(d, "%s_Facts.md" % k),
+                            encoding="utf-8").read()
+            self.assertIn(u"精簡版", facts)
+            self.assertIn(u"## 2.", facts)
+            self.assertNotIn(u"## 10.", facts)
+            self.assertNotIn(u"## 11.", facts)
+            if miss:
+                self.assertIn(u"缺 %d 份規格書" % miss, facts)
             self.assertTrue(os.path.exists(
                 os.path.join(d, "%s_Architecture.md" % k)))
             self.assertRegex(setup, u"architecture —— %s（claude -p）\\s+OK.*token" % k)
 
-    def test_facts_command_still_writes_on_demand(self):
+    def test_facts_full_writes_everything(self):
         d = _folder()
         ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
-        ndd.main(["--config", os.path.join(d, "ndd.json"), "facts"])
-        self.assertTrue([f for f in os.listdir(d) if f.endswith("_Facts.md")])
+        ndd.main(["--config", os.path.join(d, "ndd.json"), "facts", "--full"])
+        txt = io.open(os.path.join(d, "board_a_Facts.md"), encoding="utf-8").read()
+        self.assertIn(u"## 10.", txt)
+        self.assertIn(u"## 11.", txt)
 
     def test_no_arch_skips_it_and_says_so(self):
         d = _folder()

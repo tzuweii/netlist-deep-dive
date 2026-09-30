@@ -1507,7 +1507,6 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     w(u"> **這是 `init` 自動產生的事實表**，只含**不需要規格書就能斷言的事實**"
       u"（`[N]` netlist／`[B]` BOM／`[S]` 階層）。")
-    w(u"> 它是撰寫 `%s_Architecture.md`（給人讀的板卡導覽）的材料。" % key)
     w(u"> 腳位功能、訊號方向、極性、某條路通不通——那些要 `[D]` 規格書，"
       u"**這份文件不會有**，見最後一節。連線一律**沒有方向**。")
     w(u"> 逐腳查詢請用 `ndd.py --board %s pins/net/part`，不要靠本文。" % key)
@@ -1533,8 +1532,10 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     elif not t.kids.get(()):
         w(u"這塊板的原理圖**沒有子電路**，全部零件都在頂層。§3 改用零件之間的連線。")
     else:
-        w(u"`.DSN` 的子電路，由外而內。**重複的收斂成一行**（倍率通常就是系統架構），"
-          u"**組成幾乎相同的兩兩並列**（常見於主／備）。每行後面是該處的主動件 `[B]`。")
+        w(u"`.DSN` 的子電路，由外而內。**組成完全相同的收斂成一行**並標倍率，"
+          u"**組成幾乎相同的兩兩並列**並列出差在哪。每行後面是該處的主要零件料號 `[B]`"
+          u"（依訊號腳數排序）；〔 〕是設計者選的 symbol 名前綴 `[S]`——是零件庫的"
+          u"命名，不是驗證過的功能。")
         if flat:
             w(u"")
             w(u"⚠️ %d 顆裡有 %d 顆在頂層、不在任何子電路——階層只切了一小部分，"
@@ -1572,7 +1573,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
                                               len(ns), _sample(ns)))
         w(u"")
         if wide:
-            w(u"**跨 %d 個以上方塊的共用網路**（匯流排、共用致能一類）：" % _WIDE_NET)
+            w(u"**跨 %d 個以上方塊的共用網路**：" % _WIDE_NET)
             w(u"")
             w(u"| 網路 | 碰到幾個方塊 | 方塊 |")
             w(u"|---|---|---|")
@@ -1591,7 +1592,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
             w(u"（訊號腳最多的零件都只接在自己的子電路裡）")
         else:
             w(u"訊號腳伸出自己方塊最多的幾顆，每支訊號腳（穿過一顆串阻／電容也算）"
-              u"落在哪些方塊。這通常就是控制中樞。")
+              u"落在哪些方塊。")
             w(u"")
             w(u"| 零件 | 料號 `[B]` | 所在 `[S]` | 訊號腳 | 落在（腳數） |")
             w(u"|---|---|---|---|---|")
@@ -1636,22 +1637,22 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
             w(u"| 料號 `[B]` | 幾顆 | 分類 | 非電源訊號腳 `[N]` | 代表 refdes |")
             w(u"|---|---|---|---|---|")
             for rd, pn, cat, src, n, cnt in rows:
-                mark = u"" if src == ndd_classify.SRC_CIS else u" `[?]`"
-                w(u"| %s | %d | %s%s | %d | `%s` |"
-                  % (pn or u"未貼 %s" % nl.parts.get(rd, ""), cnt, cat, mark,
-                     n, rd))
+                # 只寫 CIS 料件資料庫給的分類；從 footprint／refdes 前綴推的不寫。
+                cat = cat if src == ndd_classify.SRC_CIS else u"—"
+                w(u"| %s | %d | %s | %d | `%s` |"
+                  % (pn or u"未貼 %s" % nl.parts.get(rd, ""), cnt, cat, n, rd))
             w(u"")
-            w(u"⚠️ 分類標 `[?]` 的是從 footprint／refdes 前綴**推**出來的。")
+            w(u"分類欄只列 CIS 料件資料庫有的；沒有的寫 `—`。")
         w(u"")
 
     # --- 5 I2C ----------------------------------------------------------
     buses = i2c_buses(nl, pwr_rx, is_key)
-    w(u"## 5. I2C 匯流排 `[N]`")
+    w(u"## 5. 名稱帶 SCL 的網路 `[N]`")
     w(u"")
     if not buses:
         w(u"（沒有名稱帶 `SCL` 且掛兩顆以上主動件的網路）")
     else:
-        w(u"依網路名認出的 SCL（穿過一顆串阻也算），上面掛了哪些主動件。")
+        w(u"網路名帶 `SCL` 的網路（穿過一顆串阻也算）上掛了哪些主動件。")
         w(u"")
         w(u"| SCL 網路 | 幾顆 | 掛載 `[B]` |")
         w(u"|---|---|---|")
@@ -1700,8 +1701,8 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
                                        or len(locs) > 1 else u"—"))
         if len(pw) > len(big):
             w(u"")
-            w(u"（只列 %d 支腳以上的；另有 %d 條較小的軌，多半是濾波後的區域供電、"
-              u"或名字像電源的訊號）" % (_RAIL_MIN, len(pw) - len(big)))
+            w(u"（只列 %d 支腳以上的；另有 %d 條較小的軌未列）"
+              % (_RAIL_MIN, len(pw) - len(big)))
         w(u"")
         w(u"⚠️ 這是 `power_net_regex` **目前判得出來的**。漏設一條的症狀是追跡落點"
           u"爆量；多收一條訊號的症狀是**路徑無聲消失**。")
@@ -1719,7 +1720,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
         w(u"（無）")
     else:
         w(u"netlist 有、BOM 的 `Part Reference` 欄沒有 = **未貼件 (DNI)**，共 %d 顆。"
-          u"依子電路分組，主要零件逐顆列出——**整組沒貼**通常比單顆重要：" % total)
+          u"依子電路分組，主要零件逐顆列出：" % total)
         w(u"")
         byb = collections.OrderedDict()
         for rd, fp in dni:
@@ -1891,7 +1892,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     w(u"**以下每一項都需要規格書或人工判斷，`init` 產不出來。**")
     w(u"")
-    w(u"- [ ] **訊號方向與功能** —— §3、§11 只說「相連」。誰驅動誰、哪支是致能，"
+    w(u"- [ ] **訊號方向與功能** —— 本文的連線只說「相連」。誰驅動誰、哪支是致能，"
       u"要 `[D]`；鏈路用 `ndd.py trace --board %s --from <起點>` 追" % key)
     w(u"- [ ] **重複與成對代表什麼** —— 階層只說「設計者這樣切」，"
       u"沒說那是 N 個 slot、N 路通道還是主／備")
@@ -1927,8 +1928,29 @@ def material(out, label):
     return u"\n".join(body) + u"\n"
 
 
-def write(pj, key, missing_pn=None, echo=print, out=None, save=True):
-    """產生 `<板>_Facts.md`，回傳路徑（`save=False` 時不寫檔、回傳 None）。
+def compact(out, key, label):
+    """精簡版事實表：§1–§9（組成、子電路之間的連線、跨區零件、SCL 網路、介面、
+    電源軌摘要、未貼件、訊號家族）加最後「還不知道什麼」。全是 netlist／BOM／
+    階層事實，約 6–17 KB——留在分析資料夾給人與回答問題的 LLM 查倍率、結構用。
+
+    逐顆零件接到誰（§10）、訊號鏈（§11）、多點網路、電源軌逐條、階層 port 不放：
+    那些占完整版九成以上的篇幅，要時 `ndd.py facts --full`。"""
+    L, m = out["lines"], out["marks"]
+    head = [u"# %s — 板卡事實表" % label, u"",
+            u"> **`init` 產生的事實表（精簡版）**，只含**不需要規格書就能斷言的事實**"
+            u"（`[N]` netlist／`[B]` BOM／`[S]` 階層），沒有任何判讀。"
+            u"連線一律**沒有方向**。",
+            u"> 逐顆零件接到誰、訊號鏈、多點網路、電源軌逐條、階層 port 在完整版："
+            u"`ndd.py --board %s facts --full`。逐腳查詢用 "
+            u"`ndd.py --board %s pins/net/part`。" % (key, key), u""]
+    tail = list(L[m[15]:])
+    # 精簡版沒有 §10–§14，最後一節不編號，免得看起來像漏了東西。
+    tail[0] = re.sub(r"^## \d+\. ", u"## ", tail[0])
+    return u"\n".join(head + L[m[1]:m[10]] + tail) + u"\n"
+
+
+def write(pj, key, missing_pn=None, echo=print, out=None, full=False):
+    """產生並寫出 `<板>_Facts.md`（預設精簡版；`full` 寫完整版），回傳路徑。
     `out` 給 dict 時填入 `material()` 要用的結構（`ndd.py arch` 用）。"""
     nl, bom = pj.load(key)
     hier = pj.hier(key)
@@ -1942,8 +1964,8 @@ def write(pj, key, missing_pn=None, echo=print, out=None, save=True):
     out = {} if out is None else out
     txt = render(key, label, nl, bom, hier, pj.cfg, cis, missing_pn, out=out)
     out["label"] = label
-    if not save:
-        return None
+    if not full:
+        txt = compact(out, key, label)
     p = os.path.join(pj.dir, "%s_Facts.md" % key)
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(txt)

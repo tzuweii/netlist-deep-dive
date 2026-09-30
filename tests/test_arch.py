@@ -460,6 +460,19 @@ class ArchTest(unittest.TestCase):
         self.assertNotIn(u"## 10.", txt)
         self.assertNotIn(u"這份文件還不知道什麼", txt)
 
+    def test_compact_facts_has_no_interpretation(self):
+        """精簡版 Facts 留在資料夾給人與 LLM 查，必須全是事實：不可有「通常」
+        「常見於主／備」「控制中樞」這類推論，也不含逐顆零件接到誰（§10）。"""
+        nl, bom, hier = self._rf(n=3)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
+                 out=out)
+        txt = A.compact(out, "b", "B")
+        self.assertIn(u"## 2.", txt)
+        self.assertIn(u"## 這份文件還不知道什麼", txt)
+        self.assertNotIn(u"## 10.", txt)
+        self.assertIsNone(re.search(u"通常|常見|中樞|多半|推測|應是|可能是", txt))
+
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""
         parts, nets, pns = {}, {"BUS": [], "GND": []}, {}

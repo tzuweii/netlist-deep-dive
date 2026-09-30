@@ -840,8 +840,8 @@ def cmd_init(args):
                          lambda: cmd_blockers(A(), pj), results)
     _run_step("manifest —— 輸入檔指紋", lambda: cmd_manifest(A(), pj), results)
     _run_step("review —— 人工複驗清單", lambda: cmd_review(A(), pj), results)
-    # Facts 不落地：architecture 在記憶體裡算材料，寫完 Architecture 就好。
-    # 要看 Facts 時手動跑 `ndd.py facts`。
+    _run_step("facts —— 各板事實表（精簡版）",
+              lambda: cmd_facts(A(), pj), results)
     if not args.no_arch:
         for k in pj.board_keys("all"):
             used = _run_step("architecture —— %s（claude -p）" % k,
@@ -930,7 +930,8 @@ def cmd_init(args):
         fh.write(txt)
     print("\n" + "=" * 78)
     print("寫出 %s" % sp)
-    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md%s%s"
+    print("init 完成。產生的 .md：SETUP.md / MANIFEST.md / REVIEW.md / "
+          "<板>_Facts.md%s%s"
           % ("" if args.no_arch else " / <板>_Architecture.md",
              "" if args.no_datasheets else " / datasheets/INDEX.md"))
     print("可以開始問電路問題了。")
@@ -2543,8 +2544,8 @@ def cmd_review(args, pj):
 
 
 def cmd_facts(args, pj):
-    """各板事實表 `<板>_Facts.md`——手動查閱用；init 不產生（`arch` 在記憶體裡算
-    同一份內容當材料，不落地）。
+    """各板事實表 `<板>_Facts.md`：預設精簡版（§1–§9，init 產生、留在資料夾），
+    `--full` 寫完整版（含逐顆零件接到誰、訊號鏈…，數十到數百 KB）。
 
     **刻意只含 `[N]`/`[B]`/`[S]`。** 這是設計上的保證不是自律：跑到這一步
     時 datasheet 才剛盤點完（多半還沒到齊），腳位功能一類的 `[D]` 級主張
@@ -2553,7 +2554,8 @@ def cmd_facts(args, pj):
     import ndd_arch
     miss = _missing_pn(pj)
     for k in pj.board_keys(args.board):
-        ndd_arch.write(pj, k, missing_pn=miss or None)
+        ndd_arch.write(pj, k, missing_pn=miss or None,
+                       full=getattr(args, "full", False))
 
 
 def _missing_pn(pj):
@@ -2568,23 +2570,16 @@ def _missing_pn(pj):
 
 
 def _arch_board(pj, key, model=None):
-    """一塊板：在記憶體裡算 Facts 的材料 → 一次 `claude -p` 寫 Architecture。
-    回傳用量摘要。
-
-    ⚠️ **Facts 不落地，成功後舊的 `<板>_Facts.md` 也刪掉。** 它數十到數百 KB、
-       不是給人讀的；留在分析資料夾裡，之後回答電路問題時 LLM 翻資料夾會整份
-       讀進來，也可能是舊版。要看時手動跑 `ndd.py facts`。"""
+    """一塊板：寫精簡版 Facts（同時算好材料）→ 一次 `claude -p` 寫 Architecture。
+    回傳用量摘要。材料取自完整版的內容，在記憶體裡、不落地。"""
     import time
     import ndd_arch
     import ndd_write
     t0 = time.time()
     out = {}
-    ndd_arch.write(pj, key, out=out, save=False)
+    ndd_arch.write(pj, key, missing_pn=_missing_pn(pj) or None, out=out)
     u = ndd_write.run(pj.dir, key, ndd_arch.material(out, out["label"]),
                       model=model)
-    old = os.path.join(pj.dir, "%s_Facts.md" % key)
-    if os.path.isfile(old):
-        os.remove(old)
     return u"輸入 %d、輸出 %d token，%d 秒" % (u["input"], u["output"],
                                           time.time() - t0)
 
@@ -2828,7 +2823,10 @@ def build_parser():
     p.add_argument("--add", nargs="+", metavar="名稱", help="把範例複製進專案（all = 全部）")
     p.add_argument("--force", action="store_true", help="覆蓋同名模型")
     p.set_defaults(func=cmd_models)
-    p = sub.add_parser("facts"); p.set_defaults(func=cmd_facts)
+    p = sub.add_parser("facts", help="各板事實表 <板>_Facts.md（預設精簡版）")
+    p.add_argument("--full", action="store_true",
+                   help="寫完整版（含逐顆零件接到誰、訊號鏈、多點網路…）")
+    p.set_defaults(func=cmd_facts)
     p = sub.add_parser("arch", help="撰寫 <板>_Architecture.md")
     p.add_argument("--model", help="指定模型（預設用 claude 的預設）")
     p.set_defaults(func=cmd_arch)

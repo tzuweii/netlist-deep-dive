@@ -60,7 +60,7 @@ python scripts/ndd.py init "C:/path/to/analysis" --run     [--bom <key>=<檔名>
 formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
 **`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
 
-產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Architecture.md`、
+產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
 5. **`<板>_Architecture.md` 是 init 的最後一步**（見 §4），在 `facts` 之後逐板自動
@@ -149,15 +149,15 @@ python scripts/ndd.py --board <板> arch
 ```
 
 **一次**無工具、單回合的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，模型
-直接輸出檔案內容。材料是 Facts 的一部分，在記憶體裡算、不落地：§1–§9（子電路樹與每區主要零件及
+直接輸出檔案內容。材料取自完整版 Facts，在記憶體裡算、不落地：§1–§9（子電路樹與每區主要零件及
 symbol 類別、子電路之間的連線、跨區零件、I2C、介面、電源軌摘要、未貼件、訊號家族）
 加 §11 訊號鏈族摘要。實測 7–22 KB，b0017 一次約輸入 1.8 萬、輸出 0.7 萬 token。
 
 - 逐顆零件的接線（§10）、逐條電源軌、多點網路**不給**——那是查證用的細節，不是
   畫系統方塊需要的；文件要讀者用 `ndd.py` 查。
-- **Facts 不留在分析資料夾**：寫完 Architecture 後，舊版留下的 `<板>_Facts.md` 也
-  一併刪除。它數十到數百 KB、不是給人讀的，之後回答電路問題時翻資料夾會被整份
-  讀進來，也可能已過期。需要時用 `ndd.py facts` 手動產生。
+- **留在資料夾的 `<板>_Facts.md` 是精簡版**（§1–§9 與待查證，6–19 KB，只有事實）。
+  完整版（逐顆零件接到誰、訊號鏈…）數十到數百 KB，翻資料夾時會被整份讀進來，
+  不落地；要時 `ndd.py facts --full`。
 - **為什麼不用 subagent**：subagent 每次請求固定開銷約 5 萬 token；無工具的
   `claude -p` 不到 1 千。
 - 用量印在終端機，init 時寫進 `SETUP.md`——交付時回報。
@@ -190,7 +190,7 @@ python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
 | 東西 | 定位 | 何時產生 |
 |---|---|---|
 | **回答本身** | **主要交付物** | 每次 |
-| `<板>_Facts.md` | **板卡事實表**——只含 `[N]`/`[B]`/`[S]` | `init` 不產生；需要時 `ndd.py facts` 手動產生 |
+| `<板>_Facts.md` | **板卡事實表（精簡版）**——只含 `[N]`/`[B]`/`[S]`，沒有判讀 | `init` 自動產生；`ndd.py facts` 重跑，`--full` 看完整版 |
 | `<板>_Architecture.md` | **板卡導覽**——以方塊圖為核心的交接文件 | `init` 自動產生；`ndd.py arch` 重寫（§4） |
 | 其他 md 文件 | 只有使用者明確要求時 | 明確要求 |
 | pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
