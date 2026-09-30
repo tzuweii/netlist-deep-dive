@@ -537,7 +537,7 @@ class TestMigrateToV2(unittest.TestCase):
 
 class TestInitReusesHier(unittest.TestCase):
     """`hier/` 已有 CSV（常見：在有 OrCAD 的電腦轉好，搬到別台分析）就沿用，
-    不叫 Capture；`.DSN` 在轉出後改過（來源記錄不符）才重轉。"""
+    不叫 Capture；沒有才轉換。沿用的一樣要與 .asc 對帳。"""
 
     def _no_cadence(self):
         import ndd_hier
@@ -558,7 +558,7 @@ class TestInitReusesHier(unittest.TestCase):
         for f in os.listdir(os.path.join(d, "_hier_fixture")):
             shutil.copy(os.path.join(d, "_hier_fixture", f), os.path.join(d, "hier", f))
 
-    def test_existing_hier_without_record_is_reused_without_orcad(self):
+    def test_existing_hier_is_reused_without_orcad(self):
         d = _folder()
         self._prefill(d)
         calls = self._no_cadence()
@@ -568,29 +568,27 @@ class TestInitReusesHier(unittest.TestCase):
         cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
         self.assertEqual(cfg["boards"]["board_a"]["hier_parts"],
                          "hier/board_a_parts.csv")
-        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
-        self.assertIn(u"沿用了沒有來源記錄的 hier CSV", setup)
 
-    def test_converted_hier_is_reused_and_recorded(self):
+    def test_reused_hier_still_crosschecked(self):
+        """沿用的 CSV 照樣與 .asc 對帳：對不上就停。"""
         d = _folder()
-        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
-        self.assertTrue(os.path.exists(os.path.join(d, "hier", "board_a_source.json")))
-        calls = self._no_cadence()
-        self.assertEqual(ndd.main(["init", d, "--run", "--no-datasheets",
-                                   "--no-arch", "--force"]), 0)
-        self.assertEqual(calls, [])
-        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
-        self.assertNotIn(u"沒有來源記錄", setup)
+        self._prefill(d)
+        nc = os.path.join(d, "hier", "board_a_nodes.csv")
+        with io.open(nc, encoding="utf-8") as fh:
+            rows = fh.read().splitlines()
+        drop = [i for i, r in enumerate(rows) if ",JX,1," in r][0]
+        with io.open(nc, "w", encoding="utf-8") as fh:
+            fh.write(u"\n".join(rows[:drop] + rows[drop + 1:]) + u"\n")
+        self._no_cadence()
+        with self.assertRaises(SystemExit):
+            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
 
-    def test_changed_dsn_is_reconverted_or_stops(self):
+    def test_missing_hier_needs_orcad(self):
         d = _folder()
-        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
-        with io.open(os.path.join(d, "board_a.DSN"), "a", encoding="utf-8") as fh:
-            fh.write(u"edited")
         self._no_cadence()
         with self.assertRaises(SystemExit) as cm:
-            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch", "--force"])
-        self.assertIn(u"來源記錄不符", str(cm.exception.code))
+            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        self.assertIn(u"Cadence", str(cm.exception.code))
 
 
 class TestVersionAndUpgradeEntryPoint(unittest.TestCase):
