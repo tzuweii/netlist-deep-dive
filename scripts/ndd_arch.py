@@ -49,6 +49,9 @@ _FLAT_FRAC = 0.7
 _WIDE_NET = 4
 # 組成相似度到這個值就視為「幾乎相同」（P/R 成對但差幾顆）。
 _NEAR = 0.9
+# 標在依規則算出的節與欄（連線數、跨區零件、分類…）：腳本從 netlist 算，沒有 LLM
+# 判讀，但規則可能算錯——是找方向的線索，引用前要用 `ndd.py` 查證。
+_EST = u"（推算）"
 
 # 電源軌表只列這麼多支腳以上的——濾波後的區域供電一條 2、3 支腳，
 # 實測一塊板被 `power_net_regex` 收進 367 條，全列等於沒列。
@@ -1509,6 +1512,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
       u"（`[N]` netlist／`[B]` BOM／`[S]` 階層）。")
     w(u"> 腳位功能、訊號方向、極性、某條路通不通——那些要 `[D]` 規格書，"
       u"**這份文件不會有**，見最後一節。連線一律**沒有方向**。")
+    w(u"> 標 **%s** 的是依規則算出的，規則可能算錯，只當找方向的線索。" % _EST)
     w(u"> 逐腳查詢請用 `ndd.py --board %s pins/net/part`，不要靠本文。" % key)
     w(u"")
 
@@ -1523,6 +1527,9 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"| 網路 | %d 條 |" % len(nl.nets))
     w(u"| 連接器 | %d 顆（%d 種）|" % (n_conn, len(conns)))
     w(u"")
+    w(u"零件、網路數直接數 netlist；active、連接器依 refdes 前綴與 footprint 名分類%s。"
+      % _EST)
+    w(u"")
 
     # --- 2 組成 ---------------------------------------------------------
     w(u"## 2. 板子的組成 `[S]`（先看這段）")
@@ -1536,6 +1543,10 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
           u"**組成幾乎相同的兩兩並列**並列出差在哪。每行後面是該處的主要零件料號 `[B]`"
           u"（依訊號腳數排序）；〔 〕是設計者選的 symbol 名前綴 `[S]`——是零件庫的"
           u"命名，不是驗證過的功能。")
+        w(u"")
+        w(u"「完全相同」是子電路裡零件的 footprint 逐顆相同（不比料號）；「幾乎相同」"
+          u"（footprint 組成相似度 ≥ %d%%）與「主要零件」的挑選依規則算出%s。"
+          % (int(_NEAR * 100), _EST))
         if flat:
             w(u"")
             w(u"⚠️ %d 顆裡有 %d 顆在頂層、不在任何子電路——階層只切了一小部分，"
@@ -1549,7 +1560,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     # --- 3 連線 ---------------------------------------------------------
     if not flat:
         edges, wide = block_links(nl, units, pwr_rx)
-        w(u"## 3. 子電路之間怎麼連 `[N]`")
+        w(u"## 3. 子電路之間怎麼連 `[N]`%s" % _EST)
         w(u"")
         w(u"兩個方塊之間有幾條**非電源**訊號相連（穿過串阻、隔直電容、磁珠仍算"
           u"同一條）。端點只算主要零件與連接器。3 組以上完全相同的子電路併成一個"
@@ -1586,7 +1597,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
 
         hubs = hub_parts(nl, bom, pwr_rx, units.node_of,
                          lambda r: (bom.pn(r), units.node_of(r)), k=8)
-        w(u"## 4. 跨子電路的零件 `[N]`")
+        w(u"## 4. 跨子電路的零件 `[N]`%s" % _EST)
         w(u"")
         if not hubs:
             w(u"（訊號腳最多的零件都只接在自己的子電路裡）")
@@ -1604,7 +1615,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
                                                   _top(named, 5)))
         w(u"")
     else:
-        w(u"## 3. 主要零件之間怎麼連 `[N]`")
+        w(u"## 3. 主要零件之間怎麼連 `[N]`%s" % _EST)
         w(u"")
         rows = major_parts(nl, bom, cfg, cis, pwr_rx)
         hub_pn = set(pn for _rd, pn, _c, _s, _n, _cnt in rows[:15] if pn)
@@ -1629,7 +1640,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
                 w(u"| %s | %s | %d | %s |" % (who, pn, nsig,
                                              _top(reach, 5) or u"—"))
         w(u"")
-        w(u"## 4. 主要零件 `[B]`")
+        w(u"## 4. 主要零件 `[B]`%s" % _EST)
         w(u"")
         if not rows:
             w(u"（無）")
@@ -1647,7 +1658,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
 
     # --- 5 I2C ----------------------------------------------------------
     buses = i2c_buses(nl, pwr_rx, is_key)
-    w(u"## 5. 名稱帶 SCL 的網路 `[N]`")
+    w(u"## 5. 名稱帶 SCL 的網路 `[N]`%s" % _EST)
     w(u"")
     if not buses:
         w(u"（沒有名稱帶 `SCL` 且掛兩顆以上主動件的網路）")
@@ -1679,13 +1690,16 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
             w(u"| %s | %d | %d | %s | %s | %s |"
               % (pn or u"—", len(rds), npin, _rng(rds), loc, mt))
         w(u"")
+        w(u"哪些零件算連接器依規則判定%s：refdes `J` 開頭或 footprint 以 `conn` 開頭。"
+          % _EST)
+        w(u"")
         w(u"「已定案的對接」只列板對板接頭寫進 `ndd.json` `mates` 的；空白**不代表"
           u"沒對接**，跑 `ndd.py mate` 看排名與證據。同軸、線纜埠接到哪裡"
           u"**不在任何一份來源裡**。")
     w(u"")
 
     # --- 7 電源 ---------------------------------------------------------
-    w(u"## 7. 電源軌 `[N]`")
+    w(u"## 7. 電源軌 `[N]`%s" % _EST)
     w(u"")
     pw = power_nets(nl, pwr_rx)
     if not pw:
@@ -1930,16 +1944,20 @@ def material(out, label):
 
 def compact(out, key, label):
     """精簡版事實表：§1–§9（組成、子電路之間的連線、跨區零件、SCL 網路、介面、
-    電源軌摘要、未貼件、訊號家族）加最後「還不知道什麼」。全是 netlist／BOM／
-    階層事實，約 6–17 KB——留在分析資料夾給人與回答問題的 LLM 查倍率、結構用。
+    電源軌摘要、未貼件、訊號家族）加最後「還不知道什麼」。全由腳本從 netlist／BOM／
+    階層算出、沒有 LLM 判讀；依規則算出的節標 `_EST`。約 8–20 KB——留在分析資料夾給人與回答問題的 LLM 查倍率、結構用。
 
     逐顆零件接到誰（§10）、訊號鏈（§11）、多點網路、電源軌逐條、階層 port 不放：
     那些占完整版九成以上的篇幅，要時 `ndd.py facts --full`。"""
     L, m = out["lines"], out["marks"]
     head = [u"# %s — 板卡事實表" % label, u"",
-            u"> **`init` 產生的事實表（精簡版）**，只含**不需要規格書就能斷言的事實**"
-            u"（`[N]` netlist／`[B]` BOM／`[S]` 階層），沒有任何判讀。"
-            u"連線一律**沒有方向**。",
+            u"> **`init` 產生的事實表（精簡版）**，由腳本從 `[N]` netlist／`[B]` BOM／"
+            u"`[S]` 階層算出，不用規格書、沒有 LLM 判讀。連線一律**沒有方向**。",
+            u">",
+            u"> 標 **%s** 的是依規則算出的（連線條數、跨區零件、SCL 掛載、電源軌、"
+            u"連接器與主動件分類、「幾乎相同」的配對、主要零件的挑選）：規則可能算錯，"
+            u"**只當找方向的線索**；引用任何數字或連線前，一律用 `ndd.py` 查證。" % _EST,
+            u">",
             u"> 逐顆零件接到誰、訊號鏈、多點網路、電源軌逐條、階層 port 在完整版："
             u"`ndd.py --board %s facts --full`。逐腳查詢用 "
             u"`ndd.py --board %s pins/net/part`。" % (key, key), u""]

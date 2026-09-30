@@ -473,6 +473,23 @@ class ArchTest(unittest.TestCase):
         self.assertNotIn(u"## 10.", txt)
         self.assertIsNone(re.search(u"通常|常見|中樞|多半|推測|應是|可能是", txt))
 
+    def test_compact_facts_marks_rule_derived_sections(self):
+        """依規則算出的節（連線數、跨區零件、SCL、電源軌）要標「推算」，檔頭要說
+        只當線索、引用前用 ndd.py 查證；直接讀取的節（組成、未貼件）不標。"""
+        nl, bom, hier = self._rf(n=3)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
+                 out=out)
+        txt = A.compact(out, "b", "B")
+        for h in (u"## 3. ", u"## 4. ", u"## 5. ", u"## 7. "):
+            line = [l for l in txt.splitlines() if l.startswith(h)][0]
+            self.assertIn(A._EST, line)
+        for h in (u"## 2. ", u"## 8. "):
+            line = [l for l in txt.splitlines() if l.startswith(h)][0]
+            self.assertNotIn(A._EST, line)
+        self.assertIn(u"只當找方向的線索", txt)
+        self.assertIn(u"ndd.py", txt.split(u"## 1.")[0])
+
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""
         parts, nets, pns = {}, {"BUS": [], "GND": []}, {}
