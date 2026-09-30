@@ -1401,6 +1401,61 @@ def _topo_overview(topo, fams, where):
     return L
 
 
+def branch_lines(topo, k=80):
+    """分岔點之間怎麼接：鏈只追到分岔點（分配器、開關、混頻器——接三個以上對象）
+    就停，分岔點彼此的連接才看得出 1→2→4→16、9→1 這種樹。
+
+    每個分岔點逐一列出它的對象；中間經過串在路上的零件時直接接到遠端，中間件
+    寫在括號裡。附兩端腳名（`RFIN`、`RFOUT1`、`IF1`）——方向要靠它判讀。
+    中樞（FPGA 這類）與連接器不當主詞，只當對端出現。同構的收成一族。"""
+    def reach(s, nb):
+        path, prev, cur = [s], s, nb
+        while topo.passthru(cur) and cur not in path:
+            c = topo.core(cur)
+            if prev not in c:
+                break
+            path.append(cur)
+            prev, cur = cur, (c[1] if c[0] == prev else c[0])
+        return path + [cur]
+
+    def short(rd):
+        cat = _sp_cat(topo.sp.get(rd))
+        return u"%s〔%s〕" % (rd, cat) if cat else rd
+
+    fam = collections.OrderedDict()
+    for s in sorted(topo.adj, key=_natkey):
+        if topo.is_conn(s) or topo.hub(s) or topo.passthru(s):
+            continue
+        nbs = topo.core(s)
+        if len(nbs) < 3:
+            continue
+        items = []
+        for nb in nbs:
+            p = reach(s, nb)
+            far = p[-1]
+            spin = topo._pin(s, topo.end_pins(s, p[1]))
+            fpin = topo._pin(far, topo.end_pins(far, p[-2]))
+            items.append((spin, [short(x) for x in p[1:-1]], far, fpin))
+        sig = (topo.label(s), tuple(sorted(
+            (a, tuple(re.sub(r"\d+", u"#", m) for m in mid), topo.label(f), b)
+            for a, mid, f, b in items)))
+        fam.setdefault(sig, []).append((s, items))
+    L = []
+    for (lab, _k), inst in list(fam.items())[:k]:
+        s, items = inst[0]
+        head = u"- **%s** %s" % (s, lab)
+        if len(inst) > 1:
+            head += u"（×%d 組同構，其餘 %s）" % (len(inst), _rng([x[0] for x in inst[1:]]))
+        L.append(head + u"：")
+        for spin, mid, far, fpin in sorted(items, key=lambda x: _natkey(x[0])):
+            via = (u"（經 %s）" % u"、".join(mid)) if mid else u""
+            L.append(u"  - %s ─%s─ **%s**.%s %s" % (spin, via, far, fpin,
+                                                   topo.label(far)))
+    if len(fam) > k:
+        L.append(u"- （另有 %d 族未列）" % (len(fam) - k))
+    return L
+
+
 def junctions(topo, fams, k=25):
     """鏈的交會點：一顆零件是幾條鏈的端點——開關、合成器、混頻器通常在這。
     同料號收斂。-> [(標籤, 顆數, 每顆平均鏈數, 例 refdes)]"""
@@ -1846,7 +1901,8 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     if out is not None:
         out.update(lines=L, marks=marks,
-                   topo=_topo_overview(topo, fams, where))
+                   topo=_topo_overview(topo, fams, where),
+                   branch=branch_lines(topo))
     return u"\n".join(L) + u"\n"
 
 
@@ -1862,6 +1918,12 @@ def material(out, label):
             u"（§11，同構的收成一族、只寫第一組與倍率）。連線一律沒有方向。", u""]
     body += L[m[1]:m[10]]
     body += [u"## 訊號鏈（Facts §11 摘要）", u""] + list(out["topo"])
+    if out.get("branch"):
+        body += [u"", u"## 分岔點之間怎麼接", u"",
+                 u"> 分配器、開關、混頻器這類接三個以上對象的零件，逐一列出對象；中間"
+                 u"經過串在路上的零件時直接接到遠端（括號裡是中間件）。附兩端腳名。"
+                 u"**沒有方向**——`─` 兩端對等，方向要由腳名、類別判讀。", u""]
+        body += list(out["branch"])
     return u"\n".join(body) + u"\n"
 
 
