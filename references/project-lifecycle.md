@@ -63,12 +63,15 @@ formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是�
 產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
 `datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
 
-5. **`<板>_Architecture.md` 是 init 的一步**（見 §4），跟其他步驟一樣自動完成。
+5. **`<板>_Architecture.md` 是 init 的最後一步**（見 §4），在 `facts` 之後逐板自動
+   接力產出，不用另外下指令：每塊板一次 `claude -p`，約 1 分鐘、2–3 萬 token，
+   用量與秒數記在 `SETUP.md` 的步驟表。
 
-   ⚠️ 撰寫每塊板要數分鐘，整個 `init --run` 常超過半小時，**用背景執行**
-   （Bash 的 `run_in_background`），前景指令的時間上限會把它中途砍掉。
+   ⚠️ 整個 `init --run`（含規格書下載與每塊板的 Architecture）仍可能超過前景指令的
+   時間上限，**用背景執行**（Bash 的 `run_in_background`）。
 
-   某塊板失敗會列在 `SETUP.md`，事後用 `ndd.py --board <板> arch` 補。
+   需要 Claude Code CLI（`claude`）。某塊板失敗（沒有 `claude`、呼叫出錯）不會中止
+   init，會列在 `SETUP.md` 的待辦，事後用 `ndd.py --board <板> arch` 補。
 
 ### init 自動決定與不決定的
 

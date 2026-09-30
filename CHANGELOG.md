@@ -73,6 +73,10 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
 - 定位改成：LLM 依階層、symbol 類別與主要鏈路寫出**系統方塊架構與 system-level
   理解**，交接給使用者；逐腳細節不進這份文件，要時查 `<板>_Facts.md` 或 `ndd.py`。
 - `--stage`、`arch_pack/`、`work/` 草稿都拿掉了。
+- `init --run` 在 `facts` 之後逐板接力產出 Architecture（每塊板約 1 分鐘），
+  `SETUP.md` 步驟表記下每塊板的 token 與秒數；失敗不中止，列進待辦。修掉一個
+  接力時的錯：architecture 那步重寫 Facts 時沒帶缺件數，init 跑完 Facts 最後一節
+  的「缺 N 份規格書」會不見。
 
 ### Facts
 

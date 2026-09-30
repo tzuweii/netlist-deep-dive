@@ -9,6 +9,7 @@
 """
 import io
 import json
+import re
 import os
 import shutil
 import sys
@@ -114,6 +115,23 @@ class TestInitRun(unittest.TestCase):
             self.assertTrue(os.path.exists(
                 os.path.join(d, "%s_Architecture.md" % k)), "缺 %s" % k)
         self.assertFalse(os.path.exists(os.path.join(d, "arch_pack")))
+
+    def test_architecture_step_keeps_facts_intact_and_reports_usage(self):
+        """architecture 這步會重寫 Facts——缺件數要和 facts 那步一樣帶進去；
+        SETUP.md 記下每塊板的用量。"""
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        idx = io.open(os.path.join(d, "datasheets", "INDEX.md"),
+                      encoding="utf-8").read()
+        miss = int(re.search(r"<!-- missing: (\d+) -->", idx).group(1))
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        for k in cfg["boards"]:
+            facts = io.open(os.path.join(d, "%s_Facts.md" % k),
+                            encoding="utf-8").read()
+            if miss:
+                self.assertIn(u"缺 %d 份規格書" % miss, facts)
+            self.assertRegex(setup, u"architecture —— %s（claude -p）\\s+OK.*token" % k)
 
     def test_no_arch_skips_it_and_says_so(self):
         d = _folder()

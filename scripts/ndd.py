@@ -2551,27 +2551,37 @@ def cmd_facts(args, pj):
     沒有材料可寫。給人讀的導覽由 AI 讀這份再撰寫。
     """
     import ndd_arch
-    ddir = os.path.join(pj.dir,
-                        (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"))
-    miss = 0
-    ip = os.path.join(ddir, ndd_pinfn.INDEX_NAME)
-    if os.path.isfile(ip):
-        with io.open(ip, encoding="utf-8") as fh:
-            m = re.search(r"<!-- missing: (\d+) -->", fh.read())
-        miss = int(m.group(1)) if m else 0
+    miss = _missing_pn(pj)
     for k in pj.board_keys(args.board):
         ndd_arch.write(pj, k, missing_pn=miss or None)
 
 
-def _arch_board(pj, key, model=None, missing_pn=None):
-    """一塊板：寫 Facts → 一次 `claude -p` 寫 Architecture。回傳用量摘要。"""
+def _missing_pn(pj):
+    """`datasheets/INDEX.md` 記的缺件數；沒有盤點過就是 0。"""
+    ip = os.path.join(pj.dir, (pj.cfg.get("datasheets") or {}).get("dir", "datasheets"),
+                      ndd_pinfn.INDEX_NAME)
+    if not os.path.isfile(ip):
+        return 0
+    with io.open(ip, encoding="utf-8") as fh:
+        m = re.search(r"<!-- missing: (\d+) -->", fh.read())
+    return int(m.group(1)) if m else 0
+
+
+def _arch_board(pj, key, model=None):
+    """一塊板：寫 Facts → 一次 `claude -p` 寫 Architecture。回傳用量摘要。
+
+    Facts 會重寫一次（材料要從同一次 render 取），所以缺件數要照 `facts` 那一步
+    一樣帶進去——漏帶的話，init 跑完 Facts 最後一節的「缺 N 份規格書」會不見。"""
+    import time
     import ndd_arch
     import ndd_write
+    t0 = time.time()
     out = {}
-    ndd_arch.write(pj, key, missing_pn=missing_pn, out=out)
+    ndd_arch.write(pj, key, missing_pn=_missing_pn(pj) or None, out=out)
     u = ndd_write.run(pj.dir, key, ndd_arch.material(out, out["label"]),
                       model=model)
-    return u"輸入 %d、輸出 %d token" % (u["input"], u["output"])
+    return u"輸入 %d、輸出 %d token，%d 秒" % (u["input"], u["output"],
+                                          time.time() - t0)
 
 
 def cmd_arch(args, pj):
