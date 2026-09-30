@@ -24,6 +24,11 @@ TIMEOUT = 60 * 60
 # 測試替換 `claude -p` 用（init 的測試會一路跑到這裡，不能真的呼叫）。
 DEFAULT_RUNNER = None
 
+# 固定寫在每份 Architecture 第一行（不交給 LLM 寫）：之後回答電路問題時，翻到這份
+# 的 LLM 第一眼就知道它是判讀、不是證據。
+BANNER = (u"> ⚠️ **本文是 LLM 依接線與命名判讀的導覽，未經查證，不可當證據引用。** "
+          u"方向、元件角色與結論都可能錯；回答電路問題一律用 `ndd.py` 查證。\n\n")
+
 _RX_FENCE = re.compile(r"^\s*```(?:markdown|md)?\s*\n(.*)\n```\s*$", re.S)
 
 
@@ -85,7 +90,7 @@ def run(proj_dir, board, material, model=None, runner=None, echo=print):
     txt, u = call(prompt(board, material), proj_dir, model, runner)
     out = os.path.join(proj_dir, "%s_Architecture.md" % board)
     with io.open(out, "w", encoding="utf-8") as fh:
-        fh.write(strip_fence(txt))
+        fh.write(BANNER + strip_fence(txt))
     echo(u"  輸入 %d、輸出 %d token → %s" % (u["input"], u["output"],
                                          os.path.basename(out)))
     return u

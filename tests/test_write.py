@@ -31,7 +31,10 @@ class WriteTest(unittest.TestCase):
         self.assertIn(u"子電路樹", self.calls[0])
         with io.open(os.path.join(self.proj, "b_Architecture.md"),
                      encoding="utf-8") as fh:
-            self.assertEqual(fh.read(), u"# 文件\n")      # ``` 外框剝掉
+            txt = fh.read()
+        # 第一行固定是「不是證據」的標示（程式寫的，不靠 LLM），``` 外框剝掉
+        self.assertTrue(txt.startswith(u"> ⚠️ **本文是 LLM"))
+        self.assertTrue(txt.endswith(u"\n\n# 文件\n"))
         self.assertEqual(u["output"], 10)
 
     def test_brief_exists_and_is_short(self):
