@@ -2006,7 +2006,7 @@ def pair_diffs(out, grp):
     for gp, gr, a, b in prs:
         res[gr] = (gp, ndd_pair.diff_lines(mt, out["hpn"], set(t.sub[a]),
                                            set(t.sub[b]), m, out["label"],
-                                           out["where"]))
+                                           out["where"], names=(a[-1], b[-1])))
     return res
 
 

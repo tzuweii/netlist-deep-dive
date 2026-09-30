@@ -383,9 +383,38 @@ class ArchTest(unittest.TestCase):
         r = [v for k, v in A.pack(out, "B") if k.endswith("_Main_R.md")][0]
         self.assertIn(u"U22→U12", r)
         sec = r[r.index(u"## 接法不同的腳"):r.index(u"## 料號或貼件不同")]
-        self.assertIn(u"**U22**（P：U12）", sec)
-        self.assertIn(u"P 接 J10.1；R 接 U11.1", sec)
+        self.assertIn(u"**U22**（Main_P：U12）", sec)
+        self.assertIn(u"Main_P 接 J10.1；Main_R 接 U11.1", sec)
         self.assertIn(u"R99", r[r.index(u"## 只在一側"):])
+
+    def test_pair_sharing_nets_has_no_false_diffs(self):
+        """兩個相同的電源模組共用輸入軌與 I2C（不在 power_net_regex 裡）：每一套都會
+        在共用網路上看到另一套的零件——那不是差異。實測某 interposer 因此把 118 顆
+        旁路電容報成「只在一側」。完全相同的兩套要比出「無差異」。"""
+        parts, blocks, nets, pns = {}, {}, {"GND": [], "VIN": [], "SCL": []}, {}
+        for side, base in (("1", 10), ("2", 20)):
+            u, j = "U%d" % base, "J%d" % base
+            parts[u], blocks[u], pns[u] = "REG_QFN", "PM_" + side, "REG_X"
+            parts[j], blocks[j], pns[j] = "CONN_2", "PM_" + side, "CONN_X"
+            nets["VIN"].append((u, "1"))
+            nets["SCL"].append((u, "4"))
+            nets["GND"].append((u, "9"))
+            nets["VOUT_" + side] = [(u, "2"), (j, "1")]
+            for k in range(8):
+                c = "C%d%d" % (base, k)
+                parts[c], blocks[c], pns[c] = "C_0402", "PM_" + side, "CAP_X"
+                nets["VIN"].append((c, "1"))
+                nets["GND"].append((c, "2"))
+        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
+                 out=out)
+        r = [v for k, v in A.pack(out, "B") if k.endswith("_PM_2.md")][0]
+        self.assertIn(u"與 PM_1 的差異", r)
+        self.assertIn(u"（無——對應到的零件逐腳接法相同）", r)
+        self.assertIn(u"## 只在一側（對不上的零件）\n\n（無）", r)
+        self.assertNotIn(u"只在 PM", r)
+        self.assertNotIn(u"只在 R", r)            # 名稱用子電路名，不預設主備
 
     def test_pack_splits_at_part_boundary_under_cap(self):
         """超過上限就切檔，切點在零件之間；每份都帶小節標題，零件一顆不少。"""
