@@ -204,6 +204,59 @@ def _board_key(fname, used):
     return key
 
 
+def _hier_src(dsn, outdir):
+    stem = os.path.splitext(os.path.basename(dsn))[0]
+    return os.path.join(outdir, "%s_source.json" % stem)
+
+
+def _sha256(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for b in iter(lambda: fh.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def _hier_record(dsn, outdir):
+    """轉換後記下 `.DSN` 的 SHA-256，跟 CSV 一起放在 `hier/`：資料夾搬到別台
+    （沒有 OrCAD）時靠它判斷 CSV 還是不是這份 `.DSN` 轉出來的。不比修改時間——
+    複製、同步都會改掉它。"""
+    with io.open(_hier_src(dsn, outdir), "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"dsn": os.path.basename(dsn), "sha256": _sha256(dsn)},
+                            indent=2, ensure_ascii=False))
+
+
+_REUSE_HINT = ("\n  （這次用的是 hier/ 裡既有的 CSV，沒有重轉。若 %s 在轉出之後改過，"
+               "請在有 OrCAD 的電腦重轉：刪掉 hier/ 裡它的 CSV 再跑。）")
+
+
+def _hier_reuse(dsn, outdir):
+    """`hier/` 裡已有這份 `.DSN` 轉出的 CSV 就沿用，不叫 Capture。
+
+    -> `(mode, (parts_csv, nodes_csv))`，mode：
+       - `"match"`：來源記錄的雜湊與 `.DSN` 相同
+       - `"legacy"`：CSV 在但沒有來源記錄（舊版或別台轉出的）——沿用
+       - `"stale"`：來源記錄與 `.DSN` 不符——`.DSN` 轉出後改過，要重轉
+       - `"none"`：沒有 CSV
+
+    沿用的 CSV 照樣經過自我驗證、refdes 配對與 `.asc` 逐條對帳。"""
+    stem = os.path.splitext(os.path.basename(dsn))[0]
+    pc = os.path.join(outdir, "%s_parts.csv" % stem)
+    nc = os.path.join(outdir, "%s_nodes.csv" % stem)
+    if not (os.path.isfile(pc) and os.path.isfile(nc)):
+        return "none", (pc, nc)
+    src = _hier_src(dsn, outdir)
+    if not os.path.isfile(src):
+        return "legacy", (pc, nc)
+    try:
+        with io.open(src, encoding="utf-8") as fh:
+            ok = json.load(fh).get("sha256") == _sha256(dsn)
+    except (ValueError, OSError):
+        ok = False
+    return ("match" if ok else "stale"), (pc, nc)
+
+
 def _pair_dsn(rows, d, outdir, echo=print, strict=True):
     """把 `.DSN` 轉成階層 CSV，並用 **refdes 交集** 配到板子上——跟 BOM 配對
     同一套證據原則，不用檔名猜。
@@ -236,27 +289,41 @@ def _pair_dsn(rows, d, outdir, echo=print, strict=True):
              "  v2 需要 .DSN 才能取得階層與腳位功能名——那是 .asc 結構上給不了的。\n"
              "  請把每塊板的 .DSN（含其子設計目錄）與 .asc、BOM 放在同一個資料夾。" % d)
         return {}, problems
-    try:
-        tclsh, root = ndd_hier.find_cadence()   # 找不到就丟 HierError
-    except ndd_hier.HierError as exc:
-        fail(None, str(exc))
-        return {}, problems
-    echo("  Cadence: %s" % root)
+    cad = []    # 需要轉換時才找 Capture：hier 全部沿用的機器不必裝 OrCAD
+
+    def tclsh():
+        if not cad:
+            cad.append(ndd_hier.find_cadence())   # 找不到就丟 HierError
+            echo("  Cadence: %s" % cad[0][1])
+        return cad[0][0]
 
     missing = [r["key"] for r in rows]
-    by_asc = {}
+    by_asc, reused = {}, {}
     for f in dsns:
-        echo("  轉換 %s ..." % f)
-        try:
-            parts, nodes = ndd_hier.convert(os.path.join(d, f), outdir, tclsh=tclsh)
-        except ndd_hier.HierError as exc:
-            fail(None, "%s 轉換失敗：%s" % (f, exc))
-            continue
+        mode, (parts, nodes) = _hier_reuse(os.path.join(d, f), outdir)
+        if mode in ("match", "legacy"):
+            echo("  沿用 hier/%s（%s）" % (os.path.basename(parts),
+                                         "來源記錄相符" if mode == "match"
+                                         else "沒有來源記錄"))
+            reused[f] = mode
+        else:
+            echo("  轉換 %s%s ..." % (f, "（.DSN 與 hier 的來源記錄不符）"
+                                      if mode == "stale" else ""))
+            try:
+                parts, nodes = ndd_hier.convert(os.path.join(d, f), outdir,
+                                                tclsh=tclsh())
+            except ndd_hier.HierError as exc:
+                fail(None, "%s 需要轉換（%s），但轉換失敗：%s"
+                     % (f, "hier 與這份 .DSN 的來源記錄不符" if mode == "stale"
+                        else "hier/ 沒有它的 CSV", exc))
+                continue
+            _hier_record(os.path.join(d, f), outdir)
         h = ndd_hier.Hierarchy(parts, nodes)
         sc = h.selfcheck()
         if not sc["ok"]:
-            fail(None, "%s 的階層 CSV 自我驗證失敗：\n%s"
-                 % (f, ndd_hier.format_report(f, sc, {"ok": True})))
+            fail(None, "%s 的階層 CSV 自我驗證失敗：\n%s%s"
+                 % (f, ndd_hier.format_report(f, sc, {"ok": True}),
+                    _REUSE_HINT % f if f in reused else ""))
             continue
         refs = {r["base_refdes"] for r in h.real_parts()}
         best, bk = 0.0, None
@@ -269,8 +336,8 @@ def _pair_dsn(rows, d, outdir, echo=print, strict=True):
         if best < 0.9:
             fail(None,
                  "%s 對不上任何一塊板（最高 refdes 命中率 %.0f%%）。\n"
-                 "  請確認這份 .DSN 與資料夾裡的 .asc 是同一塊板、同一個版本。"
-                 % (f, best * 100))
+                 "  請確認這份 .DSN 與資料夾裡的 .asc 是同一塊板、同一個版本。%s"
+                 % (f, best * 100, _REUSE_HINT % f if f in reused else ""))
             continue
         if bk in by_asc:
             fail(bk, "兩份 .DSN 都配到 %s：%s 與 %s" % (bk, by_asc[bk][0], f))
@@ -292,11 +359,12 @@ def _pair_dsn(rows, d, outdir, echo=print, strict=True):
         cc = ndd_hier.crosscheck(h, r["nl"])
         if not cc["ok"]:
             fail(r["key"],
-                 "%s 與 %s 對帳不一致——其中一邊是錯的，先釐清再繼續：\n%s"
+                 "%s 與 %s 對帳不一致——其中一邊是錯的，先釐清再繼續：\n%s%s"
                  % (f, r["asc"], ndd_hier.format_report(
-                     f, {"ok": True, "parts": "-", "nodes": "-"}, cc)))
+                     f, {"ok": True, "parts": "-", "nodes": "-"}, cc),
+                    _REUSE_HINT % f if f in reused else ""))
             continue
-        out[r["key"]] = dict(dsn=f, hier=h, cc=cc,
+        out[r["key"]] = dict(dsn=f, hier=h, cc=cc, reused=reused.get(f),
                              parts_csv=os.path.basename(parts),
                              nodes_csv=os.path.basename(nodes))
     if missing:
@@ -459,13 +527,25 @@ def _plan(d):
     if not dsns:
         print("  !! 沒有 .DSN —— `--run` 會停下來。v2 要求每塊板 .DSN + .asc + BOM。")
     else:
-        try:
-            import ndd_hier
-            _, root = ndd_hier.find_cadence()
-            print("  Cadence: %s" % root)
-        except Exception as exc:
-            print("  !! %s" % exc)
         print("  找到 %d 份 .DSN：%s" % (len(dsns), ", ".join(dsns[:6])))
+        hd = os.path.join(d, "hier")
+        modes = {f: _hier_reuse(os.path.join(d, f), hd)[0] for f in dsns}
+        todo = [f for f in dsns if modes[f] in ("none", "stale")]
+        for f in dsns:
+            if modes[f] != "none":
+                print("     %-34s %s" % (f[:34], {
+                    "match": "沿用 hier/（來源記錄相符）",
+                    "legacy": "沿用 hier/（沒有來源記錄）",
+                    "stale": "**hier/ 與 .DSN 不符，要重轉**"}[modes[f]]))
+        if todo:
+            try:
+                import ndd_hier
+                _, root = ndd_hier.find_cadence()
+                print("  %d 份要轉換；Cadence: %s" % (len(todo), root))
+            except Exception as exc:
+                print("  !! %d 份要轉換，但 %s" % (len(todo), exc))
+        else:
+            print("  全部沿用 hier/，不需要 OrCAD")
         stems = {os.path.splitext(f)[0].lower() for f in dsns}
         for r in rows:
             hint = "（檔名相符）" if os.path.splitext(r["asc"])[0].lower() in stems else "**檔名對不上**"
@@ -774,7 +854,8 @@ def cmd_init(args):
         cc = v["cc"]
         print("  %-20s %-34s nets %s 節點 %s 零件 %s  對帳 OK%s"
               % (k, v["dsn"][:34], cc["nets"], cc["nodes"], cc["parts"],
-                 "（PADS 改名 %d 條）" % len(cc["renamed"]) if cc.get("renamed") else ""))
+                 "（PADS 改名 %d 條）" % len(cc["renamed"]) if cc.get("renamed") else "")
+              + ("（沿用既有 hier）" if v.get("reused") else ""))
 
     boards_cfg = {}
     for r in rows:
@@ -899,6 +980,12 @@ def cmd_init(args):
                 "專案代號、客戶代號），工具**不猜**；在 `ndd.json` 的 "
                 "`footprint_class` / `part_class` 補一行即可（可用裸前綴整批適用）")
     todo.append("- [ ] **缺 datasheet 的料號** —— 見 `datasheets/INDEX.md` 標「缺」與「待確認」的列")
+    legacy = sorted(v["dsn"] for v in dsn_info.values() if v.get("reused") == "legacy")
+    if legacy:
+        todo.append("- [ ] **沿用了沒有來源記錄的 hier CSV**：%s —— 已通過與 `.asc` 的"
+                    "逐條對帳，但對帳驗不到腳名與子電路切法。若這些 `.DSN` 在轉出後"
+                    "改過，請在有 OrCAD 的電腦刪掉 `hier/` 裡對應的 CSV 重跑 init"
+                    % "、".join("`%s`" % x for x in legacy))
     if args.no_arch or any(n.startswith("architecture") and st != "OK"
                            for n, st, _w in results):
         todo.append("- [ ] **補 `<板>_Architecture.md`** —— init 沒產生或某塊板"

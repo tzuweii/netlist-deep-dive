@@ -535,6 +535,64 @@ class TestMigrateToV2(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestInitReusesHier(unittest.TestCase):
+    """`hier/` 已有 CSV（常見：在有 OrCAD 的電腦轉好，搬到別台分析）就沿用，
+    不叫 Capture；`.DSN` 在轉出後改過（來源記錄不符）才重轉。"""
+
+    def _no_cadence(self):
+        import ndd_hier
+        calls = []
+        real_c, real_f = ndd_hier.convert, ndd_hier.find_cadence
+
+        def no_cad(hint=None):
+            raise ndd_hier.HierError("找不到 Cadence（測試）")
+        ndd_hier.convert = lambda *a, **k: (calls.append(a) or real_c(*a, **k))
+        ndd_hier.find_cadence = no_cad
+        self.addCleanup(setattr, ndd_hier, "convert", real_c)
+        self.addCleanup(setattr, ndd_hier, "find_cadence", real_f)
+        return calls
+
+    def _prefill(self, d):
+        import shutil
+        os.makedirs(os.path.join(d, "hier"))
+        for f in os.listdir(os.path.join(d, "_hier_fixture")):
+            shutil.copy(os.path.join(d, "_hier_fixture", f), os.path.join(d, "hier", f))
+
+    def test_existing_hier_without_record_is_reused_without_orcad(self):
+        d = _folder()
+        self._prefill(d)
+        calls = self._no_cadence()
+        self.assertEqual(ndd.main(["init", d, "--run", "--no-datasheets",
+                                   "--no-arch"]), 0)
+        self.assertEqual(calls, [])
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        self.assertEqual(cfg["boards"]["board_a"]["hier_parts"],
+                         "hier/board_a_parts.csv")
+        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn(u"沿用了沒有來源記錄的 hier CSV", setup)
+
+    def test_converted_hier_is_reused_and_recorded(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        self.assertTrue(os.path.exists(os.path.join(d, "hier", "board_a_source.json")))
+        calls = self._no_cadence()
+        self.assertEqual(ndd.main(["init", d, "--run", "--no-datasheets",
+                                   "--no-arch", "--force"]), 0)
+        self.assertEqual(calls, [])
+        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertNotIn(u"沒有來源記錄", setup)
+
+    def test_changed_dsn_is_reconverted_or_stops(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        with io.open(os.path.join(d, "board_a.DSN"), "a", encoding="utf-8") as fh:
+            fh.write(u"edited")
+        self._no_cadence()
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch", "--force"])
+        self.assertIn(u"來源記錄不符", str(cm.exception.code))
+
+
 class TestVersionAndUpgradeEntryPoint(unittest.TestCase):
     """`ndd.py version <資料夾>` 是升級流程的入口。
 

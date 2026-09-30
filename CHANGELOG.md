@@ -123,6 +123,11 @@ python scripts/ndd.py migrate "C:/path/to/analysis" --run
   不加其他旗標（實測有代理人自行加 `--no-arch` 跳過 Architecture）。BOM 配對信心不足
   改為和 `.DSN` 對帳不過一樣的中止，把訊息轉給使用者，不再列為要問的選項；拿掉 init
   後「問板子怎麼組成」那一步。`--plan` 輸出同步。
+- init 沿用 `hier/` 裡既有的 CSV，不叫 Capture：在有 OrCAD 的電腦轉好、搬到別台
+  分析時不必再轉。轉換後在 `hier/<stem>_source.json` 記下 `.DSN` 的 SHA-256，雜湊
+  不符（`.DSN` 轉出後改過）才重轉，此時沒有 Capture 就中止。沒有記錄的舊 CSV 照樣
+  沿用，並列進 `SETUP.md` 待辦。沿用的 CSV 一樣經過自我驗證、refdes 配對與 `.asc`
+  逐條對帳。`--plan` 列出每份 `.DSN` 沿用或要轉換。
 - `project-lifecycle.md` 拿掉與執行 init 無關的用量、大小、秒數與設計理由說明；修正
   規格書下載預設值（`init` 預設下載、`migrate` 預設不下載）。
 - 每份 Architecture 第一行由程式寫入「LLM 判讀、未經查證、不可當證據引用」；

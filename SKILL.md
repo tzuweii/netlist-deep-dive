@@ -17,8 +17,8 @@ description: 由 OrCAD Capture 設計檔 (.DSN)、PADS 2000 ASCII netlist (.asc)
 | BOM | **身分**（料號、值）與**有沒有貼件** |
 | `.DSN` | **階層**（零件在哪個子電路）與**腳位功能名**（`SENSE3+`、低有效標記） |
 
-`.DSN` 由 `init` 自動透過 Capture 自己的 TCL API **唯讀**轉成兩份 CSV，
-轉完逐條對帳 `.asc`：不一致就停下來，不會默默採用。
+`.DSN` 由 `init` 自動透過 Capture 自己的 TCL API **唯讀**轉成兩份 CSV（`hier/`
+已有就沿用），逐條對帳 `.asc`：不一致就停下來，不會默默採用。
 
 ## 開始前先讀
 
