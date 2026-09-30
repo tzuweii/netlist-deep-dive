@@ -307,20 +307,9 @@ def two_package_variants(mpn="EXP_A"):
 # ------------------------------------------------------------ claude -p 替身 --
 def fake_claude(prompt):
     """`ndd_write` 的 runner 替身：init 的測試會一路跑到撰寫 Architecture，
-    不能真的呼叫 `claude -p`。A 階段把 `index.md` 列的分塊材料全分成一組
-    （總覽 `00_skeleton.md`、`00_topology*.md` 只給 A，不分組）。"""
-    import re
-    if u"A 階段" in prompt:
-        idx = re.search(u'<file name="index.md">(.*?)</file>', prompt, re.S).group(1)
-        files = [f for f in re.findall(u"`([^`]+\.md)`", idx) if f != "00_skeleton.md"
-                 and not f.startswith("00_topology")]
-        txt = u"# 大綱\n\n```groups\n1: %s\n```\n" % u", ".join(files)
-    elif u"C 階段" in prompt:
-        txt = u"# 架構交接\n"
-    else:
-        txt = u"# 分塊\n"
-    return txt, {"input": len(prompt), "output": len(txt), "turns": 1,
-                 "cost_usd": 0}
+    不能真的呼叫 `claude -p`。"""
+    txt = u"# 架構交接\n"
+    return txt, {"input": len(prompt), "output": len(txt), "cost_usd": 0}
 
 
 def _install_fake_claude():

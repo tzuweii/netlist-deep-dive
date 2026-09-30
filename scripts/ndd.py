@@ -901,8 +901,7 @@ def cmd_init(args):
     if args.no_arch or any(n.startswith("architecture") and st != "OK"
                            for n, st, _w in results):
         todo.append("- [ ] **補 `<板>_Architecture.md`** —— init 沒產生或某塊板"
-                    "失敗（見上表）；跑 `ndd.py --board <板> arch`，失敗的板可用 "
-                    "`--stage` 從壞掉的階段接著跑（流程見 "
+                    "失敗（見上表）；跑 `ndd.py --board <板> arch`（流程見 "
                     "`references/project-lifecycle.md` §4）")
     todo.append("- [ ] **尚未定義任何斷言** —— 文件寫到哪，`assertions` 就要補到哪")
     todo.append("- [ ] **`trace.start` 未設** —— trace 目前從所有對接連接器出發；"
@@ -2564,36 +2563,25 @@ def cmd_facts(args, pj):
         ndd_arch.write(pj, k, missing_pn=miss or None)
 
 
-def _arch_board(pj, key, stage="all", model=None, missing_pn=None):
-    """一塊板：備材料 → A／B／C → 成功就把材料與中間稿整包刪掉。回傳用量摘要。
-
-    ⚠️ 刪掉是刻意的：`arch_pack/` 是 Facts 的重複切片，`work/` 是未經 C 修正的
-       草稿（實測 A 的草稿就有判錯的時脈來源）。留在分析資料夾裡，之後回答
-       電路問題時 Grep 一個 refdes 就會撈到它們。**失敗時保留**，好用 `--stage`
-       接著跑、也看得到壞在哪一階段。"""
-    import shutil
+def _arch_board(pj, key, model=None, missing_pn=None):
+    """一塊板：寫 Facts → 一次 `claude -p` 寫 Architecture。回傳用量摘要。"""
     import ndd_arch
     import ndd_write
-    ndd_arch.write(pj, key, missing_pn=missing_pn, with_pack=True)
-    log = ndd_write.run(pj.dir, key, stage=stage, model=model)
-    if stage in ("C", "all"):
-        d = os.path.join(pj.dir, ndd_arch.PACK_DIR)
-        shutil.rmtree(os.path.join(d, key), ignore_errors=True)
-        if os.path.isdir(d) and not os.listdir(d):
-            os.rmdir(d)
-    return u"輸入 %d、輸出 %d token" % (sum(u["input"] for _t, u in log),
-                                     sum(u["output"] for _t, u in log))
+    out = {}
+    ndd_arch.write(pj, key, missing_pn=missing_pn, out=out)
+    u = ndd_write.run(pj.dir, key, ndd_arch.material(out, out["label"]),
+                      model=model)
+    return u"輸入 %d、輸出 %d token" % (u["input"], u["output"])
 
 
 def cmd_arch(args, pj):
-    """撰寫 `<板>_Architecture.md`（A 重建架構 → B 逐區驗證 → C 寫成文件）。
-
-    每次呼叫是無工具、單回合的 `claude -p`，材料直接放進訊息——見 `ndd_write`。"""
+    """撰寫 `<板>_Architecture.md`：Facts 的全板部分＋訊號鏈摘要，一次無工具的
+    `claude -p` 寫成以系統方塊圖為核心的交接文件——見 `ndd_write`。"""
     import ndd_write
     for k in pj.board_keys(args.board):
         print("== %s" % k)
         try:
-            print("  %s" % _arch_board(pj, k, stage=args.stage, model=args.model))
+            _arch_board(pj, k, model=args.model)     # 用量由 ndd_write 印
         except ndd_write.WriteError as exc:
             print("!! %s" % exc)
             return 2
@@ -2826,8 +2814,6 @@ def build_parser():
     p.set_defaults(func=cmd_models)
     p = sub.add_parser("facts"); p.set_defaults(func=cmd_facts)
     p = sub.add_parser("arch", help="撰寫 <板>_Architecture.md")
-    p.add_argument("--stage", choices=["A", "B", "C", "all"], default="all",
-                   help="只跑某一階段（預設 all）")
     p.add_argument("--model", help="指定模型（預設用 claude 的預設）")
     p.set_defaults(func=cmd_arch)
     p = sub.add_parser("manifest"); p.set_defaults(func=cmd_manifest)

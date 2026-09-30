@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""`ndd_write`：三階段撰寫的派工。真正的 `claude -p` 呼叫以 runner 替換。
-
-⚠️ 最容易悄悄壞掉的是 **A 的分組**：漏分一份材料不會噴錯，只會讓那幾個方塊
-   在文件裡消失。所以分組不完整一律停下來，不替 A 補。
-"""
+"""`ndd_write`：一次 `claude -p` 寫 Architecture。真正的呼叫以 runner 替換。"""
 import io
-import json
 import os
 import sys
 import tempfile
@@ -17,151 +12,34 @@ sys.path.insert(0, os.path.join(os.path.dirname(HERE), "scripts"))
 
 import ndd_write as W                                          # noqa: E402
 
-GROUPS = u"""# 大綱
-
-```groups
-1: 01_A.md, 01_B.md
-2: 02_C.md, 00_power.md
-```
-"""
-
 
 class WriteTest(unittest.TestCase):
     def setUp(self):
         self.proj = tempfile.mkdtemp(prefix="ndd_write_")
-        self.d = os.path.join(self.proj, W.PACK_DIR, "b")
-        os.makedirs(self.d)
-        for f in ("index.md", "00_skeleton.md", "00_topology.md", "00_power.md",
-                  "01_A.md", "01_B.md", "02_C.md"):
-            with io.open(os.path.join(self.d, f), "w", encoding="utf-8") as fh:
-                fh.write(u"內容 %s\n" % f)
         self.calls = []
 
     def runner(self, prompt):
         self.calls.append(prompt)
-        if u"A 階段" in prompt:
-            txt = GROUPS
-        elif u"C 階段" in prompt:
-            txt = u"```markdown\n# 文件\n```"
-        else:
-            txt = u"# 分塊"
-        return txt, {"input": len(prompt), "output": 10, "turns": 1,
-                     "cost_usd": 0}
+        return u"```markdown\n# 文件\n```", {"input": len(prompt), "output": 10,
+                                             "cost_usd": 0}
 
-    def test_all_stages_write_files_and_usage(self):
-        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
-        w = os.path.join(self.d, W.WORK)
-        self.assertTrue(os.path.isfile(os.path.join(w, "B_1.md")))
-        self.assertTrue(os.path.isfile(os.path.join(w, "B_2.md")))
+    def test_one_call_writes_architecture(self):
+        u = W.run(self.proj, "b", u"# 材料\n子電路樹", runner=self.runner,
+                  echo=lambda *a: None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertIn(u"<file name=\"material.md\">", self.calls[0])
+        self.assertIn(u"子電路樹", self.calls[0])
         with io.open(os.path.join(self.proj, "b_Architecture.md"),
                      encoding="utf-8") as fh:
             self.assertEqual(fh.read(), u"# 文件\n")      # ``` 外框剝掉
-        with io.open(os.path.join(w, "usage.json"), encoding="utf-8") as fh:
-            self.assertEqual(sorted(json.load(fh)), ["A", "B1", "B2", "C"])
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(u["output"], 10)
 
-    def test_b_gets_only_its_own_files(self):
-        """每組只附自己的分塊檔——附全部就又回到整份材料重送。"""
-        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
-        b1 = [c for c in self.calls if u"第 1 組" in c][0]
-        self.assertIn(u"<file name=\"01_B.md\">", b1)
-        self.assertNotIn(u"<file name=\"02_C.md\">", b1)
-        self.assertIn(W.MODEL, b1)
-        # 總覽只給 A 與 C，不分給 B。
-        self.assertNotIn(u"<file name=\"00_topology.md\">", b1)
-
-    def test_a_sees_overview_and_topology(self):
-        """A 要從總覽與拓樸骨架重建架構——兩份都要附上。"""
-        W.run(self.proj, "b", stage="A", runner=self.runner, echo=lambda *a: None)
-        a = self.calls[0]
-        self.assertIn(u"<file name=\"00_skeleton.md\">", a)
-        self.assertIn(u"<file name=\"00_topology.md\">", a)
-        self.assertNotIn(u"<file name=\"01_A.md\">", a)
-
-    def test_c_reads_only_model_and_b(self):
-        """C 只讀 A 模型與 B 驗證結果，不再吃任何 Facts 切片（連總覽都不讀）。"""
-        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
-        c = [x for x in self.calls if u"C 階段" in x][0]
-        for f in (u"work/" + W.MODEL, u"work/B_1.md", u"work/B_2.md"):
-            self.assertIn(u"<file name=\"%s\">" % f, c)
-        for f in (u"00_skeleton.md", u"00_topology.md", u"01_A.md"):
-            self.assertNotIn(u"<file name=\"%s\">" % f, c)
-
-    def test_brief_is_cut_per_stage(self):
-        """每次呼叫只帶該階段用得到的節：B 不帶寫法原則、C 不帶材料說明，
-        三階段一節只留自己那小節。"""
-        brief = u"""# 規範
-
-## 目標
-<!-- stages: A B C -->
-目標內容
-
-## 材料
-<!-- stages: A B -->
-材料內容
-
-## 寫法
-<!-- stages: C -->
-寫法內容
-
-## 三階段
-<!-- stages: each -->
-開頭
-
-### A —— 重建
-A 內容
-
-### B —— 驗證
-B 內容
-
-### C —— 寫
-C 內容
-
-## 輸出
-<!-- stages: A B C -->
-輸出內容
-"""
-        b = W.brief_for("B", brief)
-        self.assertIn(u"目標內容", b)
-        self.assertIn(u"材料內容", b)
-        self.assertNotIn(u"寫法內容", b)
-        self.assertIn(u"B 內容", b)
-        self.assertNotIn(u"A 內容", b)
-        self.assertNotIn(u"C 內容", b)
-        self.assertIn(u"輸出內容", b)
-        self.assertNotIn(u"stages:", b)
-        c = W.brief_for("C", brief)
-        self.assertNotIn(u"材料內容", c)
-        self.assertIn(u"寫法內容", c)
-        # 真正的 brief 每一段都要帶標記（漏標會變成每階段都送）。
-        real = io.open(W.BRIEF, encoding="utf-8").read()
-        for sec in real.split(u"\n## ")[1:]:
-            self.assertIn(u"<!-- stages:", sec.split(u"\n")[1], sec[:20])
-
-    def test_topology_is_not_a_b_material(self):
-        """`00_topology*.md` 只給 A 看，不在分組範圍內——A 沒分它不可報「漏分」。"""
-        with io.open(os.path.join(self.d, "00_topology_2.md"), "w",
-                     encoding="utf-8") as fh:
-            fh.write(u"續\n")
-        self.assertEqual(W.overview_files(self.d),
-                         ["00_skeleton.md", "00_topology.md", "00_topology_2.md"])
-        W.run(self.proj, "b", runner=self.runner, echo=lambda *a: None)
-
-    def test_groups_must_cover_every_material(self):
-        with self.assertRaises(W.WriteError):
-            W.parse_groups(u"```groups\n1: 01_A.md\n```",
-                           ["01_A.md", "01_B.md"])
-
-    def test_groups_reject_duplicates_and_unknown(self):
-        with self.assertRaises(W.WriteError):
-            W.parse_groups(u"```groups\n1: 01_A.md\n2: 01_A.md\n```", ["01_A.md"])
-        with self.assertRaises(W.WriteError):
-            W.parse_groups(u"```groups\n1: 99_X.md\n```", ["01_A.md"])
-
-    def test_groups_accept_backticks_and_cjk_comma(self):
-        g = W.parse_groups(u"```groups\n1：`01_A.md`、01_B.md\n```",
-                           ["01_A.md", "01_B.md"])
-        self.assertEqual(g, [(1, ["01_A.md", "01_B.md"])])
+    def test_brief_exists_and_is_short(self):
+        """規範是系統提示，每次呼叫都送——保持精簡，只講原則不講模板。"""
+        with io.open(W.BRIEF, encoding="utf-8") as fh:
+            txt = fh.read()
+        self.assertIn(u"方塊圖", txt)
+        self.assertLess(len(txt.encode("utf-8")), 6000)
 
 
 if __name__ == "__main__":

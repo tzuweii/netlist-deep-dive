@@ -326,110 +326,6 @@ class ArchTest(unittest.TestCase):
         self.assertIn(u"J4.D14", s)
 
     # ---- 撰寫材料切包 -------------------------------------------------
-    def test_pack_keeps_every_redundant_copy(self):
-        """主／備每一份都要進包——P/R 是這塊板的事實，不可合併成「以 P 為例」。
-        R 側以「對應表＋差異」的形式進包，一顆都不能漏。"""
-        parts, blocks, nets = {}, {}, {"GND": []}
-        for i, side in ((1, "P"), (2, "R")):
-            a, b = "U%d1" % i, "U%d2" % i
-            parts[a], parts[b] = "IC_A", "IC_B"
-            blocks[a] = blocks[b] = "Main_%s" % side
-            nets["S_%s" % side] = [(a, "1"), (b, "1")]
-        pns = dict((r, fp) for r, fp in parts.items())
-        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
-        out = {}
-        A.render("b", "B", nl, bom, hier, {}, None, out=out)
-        files = dict(A.pack(out, "B"))
-        self.assertIn("00_skeleton.md", files)
-        self.assertIn("00_power.md", files)
-        body = u"".join(v for k, v in files.items() if not k.startswith("00_"))
-        self.assertIn(u"S_P", body)
-        # R 側改送差異：每一顆都要對應到 P 側，不可消失。
-        r = [v for k, v in files.items() if k.endswith("_Main_R.md")][0]
-        self.assertIn(u"與 Main_P 的差異", r)
-        self.assertIn(u"U21→U11", r)
-        self.assertIn(u"U22→U12", r)
-        # 骨架包是撰寫材料，不帶 Facts 的規格書說明與待查證清單。
-        self.assertNotIn(u"這份文件還不知道什麼", files["00_skeleton.md"])
-        self.assertNotIn(u"[D]", files["00_skeleton.md"].split(u"## 1.")[0])
-
-    def test_pair_diff_reports_swapped_throws(self):
-        """主備的 SPDT 兩擲對調：零件對得起來（鄰居集合相同），逐腳比對要報出來；
-        R 側多一顆未貼電阻要列在「只在一側」。"""
-        parts, blocks, nets, pns = {}, {}, {"GND": []}, {}
-        for side, base in (("P", 10), ("R", 20)):
-            j, mx, sw, amp = ("J%d" % base, "U%d" % (base + 1),
-                              "U%d" % (base + 2), "U%d" % (base + 3))
-            for rd, fp in ((j, "SMA_CONN"), (mx, "MIX_QFN"), (sw, "SW_QFN"),
-                           (amp, "AMP_QFN")):
-                parts[rd], blocks[rd], pns[rd] = fp, "Main_%s" % side, fp
-                nets["GND"].append((rd, "9"))
-            for k in range(8):                    # 旁路電容：成對判定要 ≥10 顆
-                c = "C%d%d" % (base, k)
-                parts[c], blocks[c] = "C_0402", "Main_%s" % side
-                nets["GND"].append((c, "2"))
-                nets.setdefault("VDD_%s" % side, []).append((c, "1"))
-            ext, mix = ("1", "2") if side == "P" else ("2", "1")
-            nets["EXT_%s" % side] = [(j, "1"), (sw, ext)]
-            nets["MIX_%s" % side] = [(mx, "1"), (sw, mix)]
-            nets["OUT_%s" % side] = [(sw, "3"), (amp, "1")]
-        parts["R99"], blocks["R99"] = "R_0402", "Main_R"
-        nets["OUT_R"].append(("R99", "1"))
-        nets["GND"].append(("R99", "2"))
-        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
-        out = {}
-        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^(GND|VDD)"},
-                 None, out=out)
-        r = [v for k, v in A.pack(out, "B") if k.endswith("_Main_R.md")][0]
-        self.assertIn(u"U22→U12", r)
-        sec = r[r.index(u"## 接法不同的腳"):r.index(u"## 料號或貼件不同")]
-        self.assertIn(u"**U22**（Main_P：U12）", sec)
-        self.assertIn(u"Main_P 接 J10.1；Main_R 接 U11.1", sec)
-        self.assertIn(u"R99", r[r.index(u"## 只在一側"):])
-
-    def test_pair_sharing_nets_has_no_false_diffs(self):
-        """兩個相同的電源模組共用輸入軌與 I2C（不在 power_net_regex 裡）：每一套都會
-        在共用網路上看到另一套的零件——那不是差異。實測某 interposer 因此把 118 顆
-        旁路電容報成「只在一側」。完全相同的兩套要比出「無差異」。"""
-        parts, blocks, nets, pns = {}, {}, {"GND": [], "VIN": [], "SCL": []}, {}
-        for side, base in (("1", 10), ("2", 20)):
-            u, j = "U%d" % base, "J%d" % base
-            parts[u], blocks[u], pns[u] = "REG_QFN", "PM_" + side, "REG_X"
-            parts[j], blocks[j], pns[j] = "CONN_2", "PM_" + side, "CONN_X"
-            nets["VIN"].append((u, "1"))
-            nets["SCL"].append((u, "4"))
-            nets["GND"].append((u, "9"))
-            nets["VOUT_" + side] = [(u, "2"), (j, "1")]
-            for k in range(8):
-                c = "C%d%d" % (base, k)
-                parts[c], blocks[c], pns[c] = "C_0402", "PM_" + side, "CAP_X"
-                nets["VIN"].append((c, "1"))
-                nets["GND"].append((c, "2"))
-        nl, bom, hier = _board(self.tmp, parts, nets, blocks=blocks, pns=pns)
-        out = {}
-        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
-                 out=out)
-        r = [v for k, v in A.pack(out, "B") if k.endswith("_PM_2.md")][0]
-        self.assertIn(u"與 PM_1 的差異", r)
-        self.assertIn(u"（無——對應到的零件逐腳接法相同）", r)
-        self.assertIn(u"## 只在一側（對不上的零件）\n\n（無）", r)
-        self.assertNotIn(u"只在 PM", r)
-        self.assertNotIn(u"只在 R", r)            # 名稱用子電路名，不預設主備
-
-    def test_pack_splits_at_part_boundary_under_cap(self):
-        """超過上限就切檔，切點在零件之間；每份都帶小節標題，零件一顆不少。"""
-        head = [u"# H", u""]
-        items = [(u"### BLK", [u"- **U%d**" % i, u"  - " + u"x" * 300])
-                 for i in range(10)]
-        boxes = A._chunk(head, items, 1024)
-        self.assertGreater(len(boxes), 1)
-        for b in boxes:
-            self.assertIn(u"### BLK", b)
-            self.assertLessEqual(sum(len(x.encode("utf-8")) + 1 for x in b), 1024)
-        got = [x for b in boxes for x in b if x.startswith(u"- **")]
-        self.assertEqual(len(got), 10)
-
-    # ---- §11 訊號鏈 ---------------------------------------------------
     def _rf(self, n=3):
         """n 路相同通道：接頭 -C- 放大器 - 濾波器 - SPDT，SPDT 另兩腳接接頭與偵測器
         再到接頭；放大器致能與開關控制各一條線回 FPGA（中樞）。
@@ -504,21 +400,6 @@ class ArchTest(unittest.TestCase):
         self.assertIn(u"CH#", sec)
         self.assertEqual(sec.count(u"- **C"), 2)
 
-    def test_pack_gives_each_region_its_own_chain_instance(self):
-        """B 讀的分塊檔要寫全**自己那一組**，不是第一組；拓樸包只給全貌。"""
-        nl, bom, hier = self._rf(n=3)
-        out = {}
-        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
-                 out=out)
-        files = dict(A.pack(out, "B"))
-        ch2 = [v for k, v in files.items() if k.endswith("_CH2.md")][0]
-        self.assertIn(u"**J20**", ch2)
-        self.assertIn(u"本塊 1 組", ch2)
-        self.assertNotIn(u"**J10**", ch2)
-        topo = files["00_topology.md"]
-        self.assertIn(u"×3 組同構", topo)
-        self.assertIn(u"其餘 2 組", topo)
-
     def test_parallel_control_does_not_cut_the_chain(self):
         """數位衰減器的 5 位元控制接到 GPIO 擴充（不是中樞）——5 條並列不是訊號
         路徑，衰減器仍是串在路上的一節，擴充器也不可被串進鏈裡。"""
@@ -563,6 +444,21 @@ class ArchTest(unittest.TestCase):
         nl, bom, hier = _board(self.tmp, parts, nets,
                                pns={"U1": "IC_A", "U2": "IC_B"})
         self.assertEqual(self._topo(nl, bom, hier).width("U1", "U2"), 2)
+
+    def test_material_is_board_level_only(self):
+        """撰寫材料 = 全板部分（§1–§9）＋鏈族摘要；逐顆零件的邊（§10）不給，
+        待查證清單（§15）也不給。階層樹的主要零件帶 symbol 類別。"""
+        nl, bom, hier = self._rf(n=3)
+        out = {}
+        A.render("b", "B", nl, bom, hier, {"power_net_regex": "^GND$"}, None,
+                 out=out)
+        txt = A.material(out, "B")
+        self.assertIn(u"## 2. 板子的組成", txt)
+        self.assertIn(u"訊號鏈（Facts §11 摘要）", txt)
+        self.assertIn(u"×3 組同構", txt)
+        self.assertIn(u"其餘 2 組", txt)            # 摘要：不逐組列
+        self.assertNotIn(u"## 10.", txt)
+        self.assertNotIn(u"這份文件還不知道什麼", txt)
 
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""

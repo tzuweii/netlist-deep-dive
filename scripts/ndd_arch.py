@@ -250,12 +250,27 @@ class KeyPart(object):
         return self._memo[rd]
 
 
-def _key_parts(nl, bom, rds, is_key, k=6):
-    """一群零件裡的主要零件，同料號收斂、依顆數排序。"""
-    c = collections.Counter(_label(nl, bom, r) for r in rds if is_key(r))
+def _key_parts(nl, bom, rds, is_key, k=12, sp=None, pwr_rx=None):
+    """一群零件裡的主要零件，同料號收斂。`sp` 是 symbol 名表時，料號後面加類別
+    前綴（`AD9735BBCZ〔DAC〕`）——讀的人一眼看出每顆的角色。
+
+    **依訊號腳數排序**（同料號取最大），不是依顆數：依顆數時 6 顆 MRAM、4 顆濾波器
+    排在唯一一顆 FPGA、ADC 前面，32 種主動件的子電路一截斷，ADC 就不見了。"""
+    sp = sp or {}
+
+    def lab(r):
+        cat = _sp_cat(sp.get(r))
+        return _label(nl, bom, r) + ((u"〔%s〕" % cat) if cat else u"")
+    c = collections.Counter()
+    sig = collections.Counter()
+    for r in rds:
+        if is_key(r):
+            x = lab(r)
+            c[x] += 1
+            sig[x] = max(sig[x], _sig_pins(nl, r, pwr_rx))
     if not c:
         return u""
-    items = sorted(c.items(), key=lambda x: (-x[1], _natkey(x[0])))
+    items = sorted(c.items(), key=lambda x: (-sig[x[0]], -x[1], _natkey(x[0])))
     s = u"、".join(u"%s ×%d" % (pn, n) if n > 1 else pn for pn, n in items[:k])
     return s + (u" 等 %d 種" % len(items) if len(items) > k else u"")
 
@@ -268,7 +283,7 @@ def _diff(ca, cb, k=3):
     return fmt(a), fmt(b)
 
 
-def tree_lines(t, bom, is_key):
+def tree_lines(t, bom, is_key, sp=None, pwr_rx=None):
     """階層樹的 markdown 條列。重複區塊收斂成一行，只展開第一個。"""
     nl = t.nl
     L = []
@@ -276,7 +291,7 @@ def tree_lines(t, bom, is_key):
     def line(depth, head, p_or_rds, extra=u""):
         rds = p_or_rds if isinstance(p_or_rds, list) else (
             t.direct[p_or_rds] if t.kids.get(p_or_rds) else t.sub[p_or_rds])
-        kp = _key_parts(nl, bom, rds, is_key)
+        kp = _key_parts(nl, bom, rds, is_key, sp=sp, pwr_rx=pwr_rx)
         tail = (u" — %s" % kp) if kp else u""
         pg = t.page.get(p_or_rds) if isinstance(p_or_rds, tuple) else None
         if pg:
@@ -1414,13 +1429,12 @@ def junctions(topo, fams, k=25):
 def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     """產生一份板卡事實表的 markdown 文字。
 
-    `out` 給一個 dict 時，另外填入切包（`pack`）要用的結構：各節起始行、
-    各子電路的邊、多點網路、階層 port。"""
+    `out` 給一個 dict 時，另外填入 `material()` 要用的結構：全文各行、各節起始行、
+    §11 的鏈族摘要。"""
     pwr_rx = re.compile(cfg.get("power_net_regex") or r"^(GND|VCC|VDD)", re.I)
     L = []
     w = L.append
     marks = {}
-    ports = []
 
     def _sec(k):
         marks[k] = len(L)
@@ -1471,7 +1485,7 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
             w(u"⚠️ %d 顆裡有 %d 顆在頂層、不在任何子電路——階層只切了一小部分，"
               u"§3 改用零件之間的連線。" % (t.n, len(t.direct[()])))
         w(u"")
-        L.extend(tree_lines(t, bom, is_key))
+        L.extend(tree_lines(t, bom, is_key, source_parts(hier), pwr_rx))
         w(u"")
         w(u"⚠️ 子電路代表**設計者怎麼切分電路**，不代表訊號怎麼走。")
     w(u"")
@@ -1725,14 +1739,10 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
       u"**同構的鏈收成一族**，第一組寫全、其餘列 refdes。**沒有方向**——"
       u"從哪端寫起只是排序。" % (_HUB_DEG, _CTRL_MAX, _SIG_MAX, _P2P_MAX))
     w(u"")
-    chains_by = []
     if not fams:
         w(u"（沒有穿過任何串接零件的鏈）")
     else:
         L.extend(chain_lines(topo, fams, where, full=True))
-        for i, (_sg, ps) in enumerate(fams, 1):
-            chains_by.append((i, [(set(p), topo.line(p, where), u" ─ ".join(p))
-                                  for p in ps]))
         w(u"")
         jn = junctions(topo, fams)
         if jn:
@@ -1751,12 +1761,10 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
     w(u"")
     w(u"一條網路上的主要零件超過 %d 顆（匯流排、共用致能、共用時脈）。" % _P2P_MAX)
     w(u"")
-    multi = []
     for n, mem in multidrop_nets(nl, pwr_rx, endpoint):
         line = u"- `%s`（%d 顆）：%s" % (n, len(set(r for r, _p in mem)), u"、".join(
             u"%s.%s%s（%s）" % (r, p, _pin_name(hpn, r, p), _label(nl, bom, r))
             for r, p in mem))
-        multi.append((set(r for r, _p in mem), line))
         w(line)
     w(u"")
 
@@ -1817,7 +1825,6 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
             line = u"- **%s**：%s" % (b, u"、".join(
                 (u"`%s`" % a) if a == n else (u"`%s`→`%s`" % (a, n))
                 for a, n in ps))
-            ports.append((b, line))
             w(line)
     else:
         w(u"（沒有階層資料）")
@@ -1838,203 +1845,29 @@ def render(key, label, nl, bom, hier, cfg, cis, missing_pn=None, out=None):
         w(u"- [ ] **缺 %d 份規格書** —— 見 `datasheets/INDEX.md`" % missing_pn)
     w(u"")
     if out is not None:
-        out.update(lines=L, marks=marks, blocks=eb, multi=multi, ports=ports,
-                   chains=chains_by, tree=t, nl=nl, bom=bom, hpn=hpn,
-                   pwr_rx=pwr_rx, label=topo.label,
-                   topo=_topo_overview(topo, fams, where),
-                   path=t.path, where=where, n_parts=len(nl.parts))
+        out.update(lines=L, marks=marks,
+                   topo=_topo_overview(topo, fams, where))
     return u"\n".join(L) + u"\n"
 
 
-PACK_DIR = "arch_pack"
+def material(out, label):
+    """寫 `<板>_Architecture.md` 的材料：Facts §1–§9（組成、子電路之間的連線、跨區
+    零件、I2C、介面、電源軌摘要、未貼件、訊號家族）加 §11 的鏈族（每族一組＋倍率）。
 
-
-def pack_groups(path, n_parts):
-    """子電路路徑 -> 分塊名。頂層子電路一塊；佔全板 `_EXPAND_FRAC` 以上的拆一層。
-
-    和 §3 方塊圖同一條拆法，分塊包才對得上圖上的方塊。"""
-    size = collections.Counter(p[0] for p in path.values() if p)
-    big = set(k for k, c in size.items() if c >= _EXPAND_FRAC * n_parts)
-
-    def grp(p):
-        if not p:
-            return ROOT_LABEL
-        return u" / ".join(p[:2]) if p[0] in big and len(p) > 1 else p[0]
-    return grp
-
-
-def _slug(s):
-    return re.sub(r"[^0-9A-Za-z_-]+", "_", s).strip("_") or "root"
-
-
-# 每份包的上限：撰寫 agent 一次 Read 讀得完（實測 60 KB 以上的包會被分段讀，
-# 每多一段就多一輪、整份 context 重送一次）。
-PACK_MAX = 40 * 1024
-
-
-def _units(lines):
-    """§10 一個子電路的行 -> [零件的行]，以 `- **` 開頭切。"""
-    out = []
-    for ln in lines:
-        if ln.startswith(u"- **") or not out:
-            out.append([])
-        out[-1].append(ln)
-    return out
-
-
-def _chunk(head, items, cap):
-    """items = [(小節標題或 None, [行])]，依序裝箱，每箱不超過 `cap` 位元組
-    （單一項目本身超過就獨佔一箱）。換箱時重複目前的小節標題。"""
-    size = lambda ls: sum(len(x.encode("utf-8")) + 1 for x in ls)
-    boxes, cur, cur_title = [], list(head), None
-    for title, ls in items:
-        add = ([u"", title, u""] if title and title != cur_title else []) + ls
-        if len(cur) > len(head) and size(cur) + size(add) > cap:
-            boxes.append(cur)
-            cur = list(head) + ([u"", title, u""] if title else [])
-            add = ls
-        cur.extend(add)
-        cur_title = title or cur_title
-    boxes.append(cur)
-    return boxes
-
-
-def pack(out, header, cap=PACK_MAX):
-    """-> [(檔名, 文字)]：骨架包、拓樸包、電源包，加上每個分塊一份（超過 `cap` 再切）。
-
-    骨架包 = §1–§9——組成、子電路之間的連線、介面。拓樸包 = §11 的鏈族（每族
-    只寫一組與倍率）與交會點——A 重建全板架構用。Facts 的開頭說明與 §15 講的是
-    規格書與待查證，不是撰寫材料，不放進來。電源包 = §13。
-    分塊包 = 碰到該分塊的 §11 鏈（每組都列）+ 各子電路的 §10 邊 + 碰到它的
-    §12 多點網路 + 它的 §14 port——B 逐區驗證拓樸用。
-    ⚠️ 主／備、×N 的每一份都照列，不合併：P/R 是這塊板的事實，要寫出來。"""
+    逐顆零件的邊（§10）、多點網路、逐條電源軌**不給**——那是查證用的細節，不是
+    畫系統方塊需要的；讀的人要細節時查 Facts 或 `ndd.py`。"""
     L, m = out["lines"], out["marks"]
-    skel = ([u"# %s — 總覽" % header, u"",
-             u"> 全板總覽：組成、子電路之間的連線、介面、電源軌摘要、未貼件。"
-             u"電源軌逐條見 `00_power.md`，各分塊的零件連線見同目錄其他檔。"
-             u"連線一律沒有方向。", u""] + L[m[1]:m[10]])
-    files = [("00_skeleton.md", u"\n".join(skel) + u"\n")]
-    tp = [u"# %s — 拓樸骨架" % header, u"",
-          u"> Facts §11 的鏈族：只接兩個對象的零件串成一條鏈，直到分岔點或連接器。"
-          u"每族只寫第一組與倍率，逐組 refdes 在各分塊檔。沒有方向。", u""]
-    for j, box in enumerate(_chunk(tp[:4], [(None, [x]) for x in out["topo"]], cap)):
-        files.append(((u"00_topology.md" if j == 0 else u"00_topology_%d.md" % (j + 1)),
-                      u"\n".join(box) + u"\n"))
-    pw = [u"# %s — 電源軌" % header, u""] + L[m[13]:m[14]]
-    for j, box in enumerate(_chunk(pw[:2], [(None, [x]) for x in pw[2:]], cap)):
-        files.append(((u"00_power.md" if j == 0 else u"00_power_%d.md" % (j + 1)),
-                      u"\n".join(box) + u"\n"))
-    grp = pack_groups(out["path"], out["n_parts"])
-    diffs = pair_diffs(out, grp)
-    # 子電路路徑字串 -> 分塊；用零件反查，因為 §10 標題就是 where(rd)。
-    blk_grp = {}
-    part_grp = {}
-    for rd, p in out["path"].items():
-        blk_grp[out["where"](rd)] = grp(p)
-        part_grp[rd] = grp(p)
-    order = collections.OrderedDict()
-    for blk in out["blocks"]:
-        order.setdefault(blk_grp.get(blk, ROOT_LABEL), []).append(blk)
-    for i, (g, blks) in enumerate(order.items(), 1):
-        if g in diffs:
-            ref, lines = diffs[g]
-            head = [u"# %s — 分塊：%s（與 %s 的差異）" % (header, g, ref), u"",
-                    u"> 腳本已把本塊每一顆零件對應到 `%s` 的某一顆（依料號、footprint、"
-                    u"鄰居結構，不看 refdes），逐腳比對接法。**這裡只列不同處**："
-                    u"未列出的零件與接法都和 `%s` 相同，讀那份材料再用下面的位號"
-                    u"對應換成本塊的 refdes。" % (ref, ref), u""]
-            items = [(None, [x]) for x in lines]
-            pts = [line for b, line in out["ports"]
-                   if b == g or b.startswith(g + u" / ")]
-            items += [(u"## 階層 port", [x]) for x in pts]
-            boxes = _chunk(head, items, cap)
-            for j, box in enumerate(boxes):
-                fn = (u"%02d_%s.md" % (i, _slug(g))) if len(boxes) == 1 else \
-                    (u"%02d_%s_%d.md" % (i, _slug(g), j + 1))
-                files.append((fn, u"\n".join(box) + u"\n"))
-            continue
-        head = [u"# %s — 分塊：%s" % (header, g), u"",
-                u"> 碰到本塊的訊號鏈（每組都列）、本塊各子電路的主要零件接到誰、"
-                u"碰到本塊的多點網路、本塊的階層 port。全板總覽見 `00_skeleton.md`、"
-                u"`00_topology.md`。"]
-        items = []
-        for cid, inst in out.get("chains") or ():
-            mine = [x for x in inst
-                    if any(part_grp.get(r, ROOT_LABEL) == g for r in x[0])]
-            if not mine:
-                continue
-            ls = [u"- **C%d**（全板 %d 組同構，本塊 %d 組）：%s"
-                  % (cid, len(inst), len(mine), mine[0][1])]
-            ls += [u"  - 同構：%s" % x[2] for x in mine[1:]]
-            items.append((u"## 訊號鏈", ls))
-        for b in blks:
-            items += [(u"### %s" % b, u) for u in _units(out["blocks"][b])]
-        mine = [line for rds, line in out["multi"]
-                if any(part_grp.get(r, ROOT_LABEL) == g for r in rds)]
-        items += [(u"## 多點網路", [x]) for x in mine]
-        pts = [line for b, line in out["ports"]
-               if b == g or b.startswith(g + u" / ")]
-        items += [(u"## 階層 port", [x]) for x in pts]
-        boxes = _chunk(head, items, cap)
-        for j, box in enumerate(boxes):
-            fn = (u"%02d_%s.md" % (i, _slug(g))) if len(boxes) == 1 else                 (u"%02d_%s_%d.md" % (i, _slug(g), j + 1))
-            files.append((fn, u"\n".join(box) + u"\n"))
-    return files
+    body = [u"# %s — 架構材料" % label, u"",
+            u"> 取自 `<板>_Facts.md`：全板組成與連線（§1–§9），加上往下追到底的訊號鏈"
+            u"（§11，同構的收成一族、只寫第一組與倍率）。連線一律沒有方向。", u""]
+    body += L[m[1]:m[10]]
+    body += [u"## 訊號鏈（Facts §11 摘要）", u""] + list(out["topo"])
+    return u"\n".join(body) + u"\n"
 
 
-def pair_diffs(out, grp):
-    """-> {R 分塊名: (P 分塊名, [差異行])}。沒有成對子電路或沒有結構時回空。"""
-    t = out.get("tree")
-    if t is None or not t.kids.get(()):
-        return {}
-    import ndd_pair
-    nl, bom, pwr_rx = out["nl"], out["bom"], out["pwr_rx"]
-    prs = ndd_pair.pairs(t, grp)
-    if not prs:
-        return {}
-    mt = ndd_pair.Matcher(nl, bom, lambda n: _is_power(n, pwr_rx),
-                          lambda n: Fabric.cls(n) == "GND")
-    m = {}
-    # 大的先配（DPU／DPU1 的 FPGA 先對上，UC 那側的外部鄰居才換得了名字）。
-    prs.sort(key=lambda x: -len(t.sub[x[2]]))
-    # 兩輪：第一輪各對自己配，第二輪帶著全部的對應再配一次——DPU 的隔直電容
-    # 另一端在 SW，SW 那對要先配好，電容才分得出誰是誰。
-    for _ in range(2):
-        for _gp, _gr, a, b in prs:
-            m.update(mt.match(t.sub[a], t.sub[b], anchor=m))
-    res = {}
-    for gp, gr, a, b in prs:
-        res[gr] = (gp, ndd_pair.diff_lines(mt, out["hpn"], set(t.sub[a]),
-                                           set(t.sub[b]), m, out["label"],
-                                           out["where"], names=(a[-1], b[-1])))
-    return res
-
-
-def write_pack(pj, key, out, label, echo=print):
-    """寫出 `arch_pack/<板>/`：骨架包、分塊包與 `index.md`（各檔大小）。"""
-    d = os.path.join(pj.dir, PACK_DIR, key)
-    if os.path.isdir(d):
-        for f in os.listdir(d):
-            if f.endswith(".md"):
-                os.remove(os.path.join(d, f))
-    else:
-        os.makedirs(d)
-    files = pack(out, label)
-    idx = [u"# %s — 撰寫材料" % label, u"",
-           u"| 檔案 | KB |", u"|---|---|"]
-    for fn, txt in files:
-        with io.open(os.path.join(d, fn), "w", encoding="utf-8") as fh:
-            fh.write(txt)
-        idx.append(u"| `%s` | %.1f |" % (fn, len(txt.encode("utf-8")) / 1024.0))
-    with io.open(os.path.join(d, "index.md"), "w", encoding="utf-8") as fh:
-        fh.write(u"\n".join(idx) + u"\n")
-    echo("寫出 %s（%d 份）" % (d, len(files)))
-    return d
-
-
-def write(pj, key, missing_pn=None, echo=print, with_pack=False):
-    """產生並寫出 `<板>_Facts.md`；`with_pack` 時另寫 `arch_pack/<板>/` 撰寫材料
-    （只有 `ndd.py arch` 要，寫完 Architecture 就刪）。回傳路徑。"""
+def write(pj, key, missing_pn=None, echo=print, out=None):
+    """產生並寫出 `<板>_Facts.md`，回傳路徑。`out` 給 dict 時填入 `material()`
+    要用的結構（`ndd.py arch` 用）。"""
     nl, bom = pj.load(key)
     hier = pj.hier(key)
     label = (pj.cfg["boards"][key].get("label") or key)
@@ -2044,12 +1877,11 @@ def write(pj, key, missing_pn=None, echo=print, with_pack=False):
         cis = ndd._cis_index(pj)
     except Exception:
         pass
-    out = {}
+    out = {} if out is None else out
     txt = render(key, label, nl, bom, hier, pj.cfg, cis, missing_pn, out=out)
+    out["label"] = label
     p = os.path.join(pj.dir, "%s_Facts.md" % key)
     with io.open(p, "w", encoding="utf-8") as fh:
         fh.write(txt)
     echo("寫出 %s" % p)
-    if with_pack:
-        write_pack(pj, key, out, label, echo)
     return p
