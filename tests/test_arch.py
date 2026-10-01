@@ -490,6 +490,22 @@ class ArchTest(unittest.TestCase):
         self.assertIn(u"只當找方向的線索", txt)
         self.assertIn(u"ndd.py", txt.split(u"## 1.")[0])
 
+    def test_branch_walk_that_loops_back_is_not_a_connection(self):
+        """一條線掛三顆零件（開關 RFC 與兩顆 buffer 的輸入），兩顆 buffer 會被當成
+        串在路上而繞回開關。不可寫成「接到自己」；同一圈只寫一行。"""
+        parts = {"U1": "SW", "U2": "BUF", "U3": "BUF", "J1": "Conn_A",
+                 "J2": "Conn_B"}
+        pns = {"U1": "SW_X", "U2": "BUF_X", "U3": "BUF_X", "J1": "CA", "J2": "CB"}
+        nets = {"A1": [("U1", "2"), ("J1", "1")],
+                "A2": [("U1", "11"), ("J2", "1")],
+                "X": [("U1", "7"), ("U2", "2"), ("U3", "2")],
+                "Y2": [("U2", "4")], "Y3": [("U3", "4")], "GND": []}
+        nl, bom, hier = _board(self.tmp, parts, nets, pns=pns)
+        txt = u"\n".join(A.branch_lines(self._topo(nl, bom, hier)))
+        self.assertNotRegex(txt, r"\*\*U1\*\*\.")
+        self.assertEqual(txt.count(u"繞成一圈"), 1)
+        self.assertIn(u"**J1**", txt)
+
     def test_bus_nets_do_not_form_chains(self):
         """匯流排上的零件不可被當成兩兩串接。"""
         parts, nets, pns = {}, {"BUS": [], "GND": []}, {}

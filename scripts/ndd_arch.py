@@ -1432,15 +1432,26 @@ def branch_lines(topo, k=80):
         nbs = topo.core(s)
         if len(nbs) < 3:
             continue
-        items = []
+        items, loops = [], set()
         for nb in nbs:
             p = reach(s, nb)
             far = p[-1]
             spin = topo._pin(s, topo.end_pins(s, p[1]))
+            if far in p[:-1]:
+                # 走回走過的零件（多半是起點）：一條線掛三顆以上時，其中兩顆
+                # 會被誤當成串在路上而繞成一圈。這不是接到另一個對象——如實
+                # 寫出來，不寫「接到自己」；同一圈從兩頭各走一次，只留一行。
+                key = (spin, frozenset(p[1:-1]))
+                if key not in loops:
+                    loops.add(key)
+                    items.append((spin, sorted((short(x) for x in p[1:-1]),
+                                               key=_natkey), None, None))
+                continue
             fpin = topo._pin(far, topo.end_pins(far, p[-2]))
             items.append((spin, [short(x) for x in p[1:-1]], far, fpin))
         sig = (topo.label(s), tuple(sorted(
-            (a, tuple(re.sub(r"\d+", u"#", m) for m in mid), topo.label(f), b)
+            (a, tuple(re.sub(r"\d+", u"#", m) for m in mid),
+             topo.label(f) if f else u"", b or u"")
             for a, mid, f, b in items)))
         fam.setdefault(sig, []).append((s, items))
     L = []
@@ -1451,6 +1462,10 @@ def branch_lines(topo, k=80):
             head += u"（×%d 組同構，其餘 %s）" % (len(inst), _rng([x[0] for x in inst[1:]]))
         L.append(head + u"：")
         for spin, mid, far, fpin in sorted(items, key=lambda x: _natkey(x[0])):
+            if far is None:
+                L.append(u"  - %s ─ %s（這幾顆與它接在同一條線上，繞成一圈，"
+                         u"追不下去；用 `ndd.py` 查）" % (spin, u"、".join(mid)))
+                continue
             via = (u"（經 %s）" % u"、".join(mid)) if mid else u""
             L.append(u"  - %s ─%s─ **%s**.%s %s" % (spin, via, far, fpin,
                                                    topo.label(far)))
