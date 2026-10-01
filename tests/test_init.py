@@ -9,6 +9,7 @@
 """
 import io
 import json
+import re
 import os
 import shutil
 import sys
@@ -101,8 +102,61 @@ class TestInitRun(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(d, f)), "缺 %s" % f)
         self.assertTrue(os.path.isdir(os.path.join(d, "export")))
         self.assertTrue(os.path.exists(
-            os.path.join(d, "datasheets", "MISSING.md")),
-            "跳過下載時仍要產生缺件清單")
+            os.path.join(d, "datasheets", "INDEX.md")),
+            "跳過下載時仍要產生規格書對照表")
+
+    def test_run_writes_architecture_and_leaves_no_drafts(self):
+        """init 自動產出每塊板的 Architecture.md；撰寫材料與中間稿**成功後刪光**
+        ——留著的話，之後回答電路問題 Grep refdes 會撈到未修正的草稿。"""
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        for k in cfg["boards"]:
+            self.assertTrue(os.path.exists(
+                os.path.join(d, "%s_Architecture.md" % k)), "缺 %s" % k)
+        self.assertFalse(os.path.exists(os.path.join(d, "arch_pack")))
+
+    def test_init_writes_compact_facts_and_reports_usage(self):
+        """init 留下的 `<板>_Facts.md` 是精簡版：只有全板事實（§1–§9 與待查證），
+        不含逐顆零件接到誰（§10）——完整版數十到數百 KB，會被翻資料夾的 LLM 整份
+        讀進來。舊版留下的完整版要被覆蓋。缺件數要帶進去；SETUP.md 記下用量。"""
+        d = _folder()
+        stale = os.path.join(d, "board_a_Facts.md")
+        with io.open(stale, "w", encoding="utf-8") as fh:
+            fh.write(u"## 10. 舊版完整 Facts\n")
+        ndd.main(["init", d, "--run", "--no-datasheets", "--accept-mates"])
+        idx = io.open(os.path.join(d, "datasheets", "INDEX.md"),
+                      encoding="utf-8").read()
+        miss = int(re.search(r"<!-- missing: (\d+) -->", idx).group(1))
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        setup = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        for k in cfg["boards"]:
+            facts = io.open(os.path.join(d, "%s_Facts.md" % k),
+                            encoding="utf-8").read()
+            self.assertIn(u"精簡版", facts)
+            self.assertIn(u"## 2.", facts)
+            self.assertNotIn(u"## 10.", facts)
+            self.assertNotIn(u"## 11.", facts)
+            if miss:
+                self.assertIn(u"缺 %d 份規格書" % miss, facts)
+            self.assertTrue(os.path.exists(
+                os.path.join(d, "%s_Architecture.md" % k)))
+            self.assertRegex(setup, u"architecture —— %s（claude -p）\\s+OK.*token" % k)
+
+    def test_facts_full_writes_everything(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        ndd.main(["--config", os.path.join(d, "ndd.json"), "facts", "--full"])
+        txt = io.open(os.path.join(d, "board_a_Facts.md"), encoding="utf-8").read()
+        self.assertIn(u"## 10.", txt)
+        self.assertIn(u"## 11.", txt)
+
+    def test_no_arch_skips_it_and_says_so(self):
+        d = _folder()
+        ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        self.assertFalse([f for f in os.listdir(d) if f.endswith("_Architecture.md")])
+        txt = io.open(os.path.join(d, "SETUP.md"), encoding="utf-8").read()
+        self.assertIn(u"補 `<板>_Architecture.md`", txt)
 
     def test_config_has_every_field_even_when_empty(self):
         """未出現在骨架裡的欄位，使用者不會知道它存在。"""
@@ -479,6 +533,62 @@ class TestMigrateToV2(unittest.TestCase):
         finally:
             ndd_hier.convert = real
         self.assertEqual(calls, [])
+
+
+class TestInitReusesHier(unittest.TestCase):
+    """`hier/` 已有 CSV（常見：在有 OrCAD 的電腦轉好，搬到別台分析）就沿用，
+    不叫 Capture；沒有才轉換。沿用的一樣要與 .asc 對帳。"""
+
+    def _no_cadence(self):
+        import ndd_hier
+        calls = []
+        real_c, real_f = ndd_hier.convert, ndd_hier.find_cadence
+
+        def no_cad(hint=None):
+            raise ndd_hier.HierError("找不到 Cadence（測試）")
+        ndd_hier.convert = lambda *a, **k: (calls.append(a) or real_c(*a, **k))
+        ndd_hier.find_cadence = no_cad
+        self.addCleanup(setattr, ndd_hier, "convert", real_c)
+        self.addCleanup(setattr, ndd_hier, "find_cadence", real_f)
+        return calls
+
+    def _prefill(self, d):
+        import shutil
+        os.makedirs(os.path.join(d, "hier"))
+        for f in os.listdir(os.path.join(d, "_hier_fixture")):
+            shutil.copy(os.path.join(d, "_hier_fixture", f), os.path.join(d, "hier", f))
+
+    def test_existing_hier_is_reused_without_orcad(self):
+        d = _folder()
+        self._prefill(d)
+        calls = self._no_cadence()
+        self.assertEqual(ndd.main(["init", d, "--run", "--no-datasheets",
+                                   "--no-arch"]), 0)
+        self.assertEqual(calls, [])
+        cfg = json.load(io.open(os.path.join(d, "ndd.json"), encoding="utf-8"))
+        self.assertEqual(cfg["boards"]["board_a"]["hier_parts"],
+                         "hier/board_a_parts.csv")
+
+    def test_reused_hier_still_crosschecked(self):
+        """沿用的 CSV 照樣與 .asc 對帳：對不上就停。"""
+        d = _folder()
+        self._prefill(d)
+        nc = os.path.join(d, "hier", "board_a_nodes.csv")
+        with io.open(nc, encoding="utf-8") as fh:
+            rows = fh.read().splitlines()
+        drop = [i for i, r in enumerate(rows) if ",JX,1," in r][0]
+        with io.open(nc, "w", encoding="utf-8") as fh:
+            fh.write(u"\n".join(rows[:drop] + rows[drop + 1:]) + u"\n")
+        self._no_cadence()
+        with self.assertRaises(SystemExit):
+            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+
+    def test_missing_hier_needs_orcad(self):
+        d = _folder()
+        self._no_cadence()
+        with self.assertRaises(SystemExit) as cm:
+            ndd.main(["init", d, "--run", "--no-datasheets", "--no-arch"])
+        self.assertIn(u"Cadence", str(cm.exception.code))
 
 
 class TestVersionAndUpgradeEntryPoint(unittest.TestCase):

@@ -130,7 +130,7 @@ python ndd.py init "C:/path/to/analysis"
 python ndd.py export        # pinmap_<board>.csv：逐腳事實表
 python ndd.py audit         # 一致性稽核（含 parser 自我驗證、模型檢查）
 python ndd.py coverage      # per-MPN 三源覆蓋，看缺口在哪
-python ndd.py mate          # 連接器對接：枚舉所有對應方式並排名
+python ndd.py mate          # 連接器對接：直通／線束接法判定
 python ndd.py trace         # signal_chain.csv + topology_hint.csv
 python ndd.py pinfn --board a --refdes U939 15   # 由工具鎖定三源查腳位
 python ndd.py datasheets    # 盤點/下載 datasheet
@@ -153,7 +153,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 **日常問答（不必呼叫 skill）** —— 把「三源對照規約」抄進該專案的 `CLAUDE.md`，
 它每個 session 自動載入。
 
-**建立新專案 / 完整分析（呼叫 skill）** —— 走一次 Phase 0–6。
+**建立新專案 / 完整分析（呼叫 skill）** —— 照 `references/project-lifecycle.md` 走一次。
 
 ## 設計原則
 
@@ -185,7 +185,8 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 |---|---|
 | `UPGRADING.md` | **升級流程（給 AI 照著做）**，版本無關；附發新版的檢查清單 |
 | `CHANGELOG.md` | 版本紀錄與 v0 對比；每版的「升級」小節寫該版特有的步驟 |
-| `SKILL.md` | Phase 0–6 工作流、三源對照規約、硬性規則 |
+| `SKILL.md` | 三源對照規約、查詢入口、判讀規則——**回答電路問題時用的那一半** |
+| `references/project-lifecycle.md` | 建檔、補規格書、建模、寫文件、交付——**一個專案大多只執行一次**，從 `SKILL.md` 搬出來的 |
 | `references/models.md` | transfer／control／endpoint 的分界與 schema |
 | `references/pitfalls.md` | 實際踩過的坑，每個都會產生「看起來合理但是錯的」結論 |
 | `references/verification.md` | 分層驗證方法，以及**結構上驗不到**的四類 |
@@ -201,7 +202,7 @@ python ndd.py review        # 產出人工複驗清單 REVIEW.md
 | `scripts/ndd_pinfn.py` | datasheet 原文抽取與快取（**不做封裝判定**） |
 | `scripts/ndd_package.py` | 封裝判定：只用 netlist + BOM 的證據排名 |
 | `scripts/ndd_models.py` | 有向 transfer 模型、control 推導 |
-| `scripts/ndd_graph.py` | 對接排名 + 跨板追跡 + hint graph |
+| `scripts/ndd_graph.py` | 對接判定 + 跨板追跡 + hint graph |
 | `scripts/ndd_audit.py` | 宣告式斷言引擎 |
 | `tests/` | 合成 fixture 回歸測試 |
 

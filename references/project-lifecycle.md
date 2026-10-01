@@ -1,0 +1,199 @@
+# 專案生命週期——建檔、補規格書、建模、寫文件、交付
+
+> **什麼時候讀這份**：要建立新專案、補規格書、建元件模型、寫架構文件、或準備
+> 交付。**平常回答電路問題完全用不到這裡的任何一條**，所以它從 `SKILL.md` 搬
+> 出來——`SKILL.md` 每次叫用都整份進 context，這裡是需要時才讀。
+>
+> 這份文件的內容**一個專案大多只會執行一次**。
+
+⚠️ **`.DSN` 要轉換時需要 OrCAD Capture**（`init` 自動偵測 `C:\Cadence\SPB_*`），
+沒有就中止而不是降級。`hier/` 裡已有該 `.DSN` 轉出的 CSV 時直接沿用、不需要
+Capture（見 §1 的表）。**工具絕不寫入 Cadence 安裝目錄。**
+
+---
+
+## 1. 建檔（`init`）
+
+> 資料夾裡已有 `ndd.json` = 已建過專案，**不要跑 `init`**（工具會擋）。
+> 升級既有專案照 `UPGRADING.md` 做。
+
+1. 每塊板**三份**：`.DSN` + `.asc` + BOM，丟進同一個資料夾。**缺任何一份就告訴
+   使用者缺什麼，不要開始。** 三份都是使用者主動提供的——工具不會去找、不會去猜、也不會少一份
+   就降級跑。三份要是**同一版設計**：netlist 匯出之後線路圖又改過，兩份各自正確
+   卻對不上，`init` 會在對帳時停下來。
+
+   `.DSN` 若有子設計目錄，一併放進來。**設計不能開在 Capture 裡**（旁邊會有
+   `.DSNlck`），否則轉換會無限等待；工具會先擋下來並要求你關閉。
+
+2. **先看 init 打算怎麼做**（只讀，不寫任何檔案）：
+
+```bash
+python scripts/ndd.py init "C:/path/to/analysis" --plan
+```
+
+會印出三件事：netlist ↔ BOM 配對（**用 refdes 交集，不用檔名猜**）、連接器對接
+候選與判定依據、datasheet 盤點。
+
+3. **init 只問使用者一件事**：用 `AskUserQuestion` 問 **datasheet 要下載還是跳過**
+   （跳過仍會產生缺件清單）。其他一律不問、不自行決定。
+
+4. **一路跑完，中途不再停**：
+
+```bash
+python scripts/ndd.py init "C:/path/to/analysis" --run     [--no-datasheets]
+```
+
+使用者選跳過才加 `--no-datasheets`；**除此之外不加任何旗標。**
+
+`--plan` 或 `--run` 報「BOM 配對信心不足」時 init 會停下來——那和 `.DSN` 對帳不過
+一樣是**檔案問題，不是選項**：把訊息與候選清單原樣轉給使用者，照使用者的指示處理。
+
+先把每塊板的 `.DSN` 轉成階層 CSV 並對帳 `.asc`，再依序執行 `pinfn --import-symbols`
+→ `export` → `datasheets` → `audit` → `mate` → `trace` → `coverage`
+→ `manifest` → `review` → `facts` → `architecture`（每塊板一次，見 §4），
+**任一步失敗不中止**，結果寫進 `SETUP.md`。
+
+⚠️ **只有 BOM 配對與階層對帳會讓 `init` 直接中止。** 兩者都排在所有流程之前，因為
+`.DSN` 與 `.asc` 對不起來就代表兩份檔案不是同一塊板／同一版，**後面每一個
+結論都會建立在錯的基礎上而不會有任何症狀**。看到它停下來，先釐清檔案版本，
+不要想辦法繞過。
+
+對帳結果裡的「PADS 改名 N 條」是正常的：`.asc` 不收 `*`、`/` 這類字元，
+formatter 會把整條 net 改名成 `X#####`。節點集合完全相同就是改名不是接錯，工具會列出對照表——
+**`.DSN` 那邊才有設計者取的原名**，回答時用原名比 `X00697` 有意義得多。
+
+產出：`ndd.json`、`SETUP.md`、`MANIFEST.md`、`REVIEW.md`、`<板>_Facts.md`、`<板>_Architecture.md`、
+`datasheets/INDEX.md`、`export/*.csv`、`hier/*.csv`、`verified-pins.csv`。
+
+5. **`<板>_Architecture.md` 是 init 的最後一步**（見 §4），在 `facts` 之後逐板自動
+   接力產出，不用另外下指令。
+
+   ⚠️ 整個 `init --run`（含規格書下載與每塊板的 Architecture）仍可能超過前景指令的
+   時間上限，**用背景執行**（Bash 的 `run_in_background`）。
+
+   需要 Claude Code CLI（`claude`）。某塊板失敗（沒有 `claude`、呼叫出錯）不會中止
+   init，會列在 `SETUP.md` 的待辦，事後用 `ndd.py --board <板> arch` 補。
+
+### init 自動決定與不決定的
+
+| 項目 | 自動 | 條件 |
+|---|---|---|
+| `.DSN` ↔ `.asc` 配對 | ✅ | 用 refdes 交集（≥ 90%），不用檔名猜；配不上就**中止** |
+| `.DSN` → 階層 CSV | ✅ | `hier/` 已有 `<stem>_parts.csv`／`_nodes.csv` 就**沿用**（視為正確，照樣與 `.asc` 對帳）；沒有才轉換：自動找 `SPB_*`（取版本最高），找不到 Capture 就**中止** |
+| 階層與 `.asc` 對帳 | ✅ | 逐條比 net／節點／零件；**任何不一致都中止**，不是警告 |
+| symbol 腳位名入庫 | ✅ | 同料號腳位名不一致時**不寫入**，列出來等人釐清 |
+| netlist ↔ BOM 配對 | ✅ | refdes 命中率 ≥ 90% 且領先次佳 ≥ 30%；否則**中止** |
+| `bom_scope` | ✅ | 檔名含 `SMT` → `smt_only`，否則 `complete` |
+| `mates` | ✅ | 腳數 ≥ 8；公母直接對接：實體大小相同、直通語意相符 ≥ 4 且多於矛盾；線束：訊號腳全部靠名稱唯一對上且 ≥ 4 支 |
+| `mates`（兩側都有同分候選） | ❌ | **netlist 真的分不出來**，列進 `SETUP.md` 等人決定 |
+| `trace.start` | 後援 | 未設時自動用所有對接連接器當起點 |
+| `net_normalize` | ❌ | 專案命名習慣，猜不得（削掉有意義的數字會把 `CLK_1`／`CLK_2` 併成同一條）。init 會**列出兩側命名差異樣本**供你寫規則 |
+| `endpoints` / `part_package` / `mate_map` | ❌ | 留空，列進 `SETUP.md` 待補 |
+
+⚠️ **`net_normalize` 對對接判定是決定性的。** 實測同一組 40-pin 連接器：沒有
+規則時 16 vs 16（判不出來），有規則時 36 vs 32（定案）。填好後重跑 `mate`。
+
+---
+
+## 2. 補 datasheet
+
+```bash
+python scripts/ndd.py datasheets              # 盤點 + 自動下載 + 產出 INDEX.md 對照表
+python scripts/ndd.py datasheets --pn <料號> --url <你查到的網址>
+```
+
+自動下載只對少數原廠站有效。流程：自動盤點 → 對 `INDEX.md` 標「缺」的料號用
+**WebSearch** 找官方網址 → `--url` 抓下來 → 自製件抓不到是正常的。
+
+---
+
+## 3. 建元件模型（選用，非前提）
+
+**不要靠記憶判斷哪顆值得建模——用數的：**
+
+```bash
+python ndd.py blockers      # 訊號鏈停在哪些料號上、各擋住幾條
+```
+
+輸出的「其他訊號腳」= 該顆除了訊號停住的那支腳外，還有幾支接在**非電源**網路
+上。數字大代表訊號很可能還會繼續走——這是**只用 netlist** 就能算的穿越件跡象。
+
+**只是終端負載的，填 `ndd.json` 的 `endpoints` 就好**，不需要建模也不需要
+datasheet。
+
+```bash
+python ndd.py models --examples        # 看有哪些範例
+python ndd.py models --add PCA9547     # 複製進專案的 models.json
+```
+
+範例**不會自動載入，要手動複製**——模型是「某人對 datasheet 的解讀」，複製這個
+動作讓它變成**你的宣告**，`audit` / `REVIEW.md` 才會把它列進你要複核的清單。
+範例的 `pin_roles` 多半留空，那要翻 datasheet 才能填，**不要憑印象**。
+
+schema、`direction` 沒有預設值、`gate` 與 `parameter_control` 的分界、`always`
+必須由 netlist 推導 —— 全部見 `references/models.md`。
+
+---
+
+## 4. 寫架構文件（`<板>_Architecture.md`）
+
+**角度與寫法全部在 `references/architecture-brief.md`**——交接視角、以系統方塊圖為
+核心、不用規格書、正文不加 `[ ]` 標記、沒有固定章節。這一節只講**怎麼跑**。
+
+**init 會自動跑**；要重寫或補某塊板時才手動跑：
+
+```bash
+python scripts/ndd.py --board <板> arch
+```
+
+**一次**無工具、單回合的 `claude -p`：brief 當系統提示，材料直接附在訊息裡，模型
+直接輸出檔案內容。材料取自完整版 Facts，在記憶體裡算、不落地：§1–§9（子電路樹與每區主要零件及
+symbol 類別、子電路之間的連線、跨區零件、I2C、介面、電源軌摘要、未貼件、訊號家族）
+加 §11 訊號鏈族摘要。
+
+- 逐顆零件的接線（§10）、逐條電源軌、多點網路**不給**——那是查證用的細節，不是
+  畫系統方塊需要的；文件要讀者用 `ndd.py` 查。
+- **留在資料夾的 `<板>_Facts.md` 是精簡版**（§1–§9 與待查證，腳本算出、沒有 LLM
+  判讀；依規則算出的節標「推算」，只當線索）。完整版（逐顆零件接到誰、訊號鏈…）
+  不落地；要時 `ndd.py facts --full`。
+
+寫完後我補兩件事：
+
+- 跑 `python scripts/ndd.py manifest`，在文件開頭引用 `MANIFEST.md`（輸入檔與
+  `ndd.json` 的 SHA-256），不手打版本號
+- 選用：文件裡可機械驗證的主張（「U20 接到 J3 共 55 條」）補進 `ndd.json` 的
+  `assertions`，跑 `audit`；**首次 FAIL 就是文件的錯**，改文件不改斷言
+
+---
+
+## 5. 交付複驗
+
+```bash
+python scripts/ndd.py review      # 產出 REVIEW.md（含 coverage 指引）
+```
+
+**這一步不可省略。** 交付時要明確告訴使用者：
+
+> 工具驗得到的部分已驗過並列在 A 段；**B 段每一項都需要你人工確認**。
+> 工具定不了的對接（`mate:ambiguous`）是佔位不是結論；`unclassified` 端點
+> 是**還沒分類**，不是「已確認為負載」。
+
+---
+
+## 產出物政策（完整對照）
+
+| 東西 | 定位 | 何時產生 |
+|---|---|---|
+| **回答本身** | **主要交付物** | 每次 |
+| `<板>_Facts.md` | **板卡事實表（精簡版）**——只取 `[N]`/`[B]`/`[S]`、沒有 LLM 判讀；標「推算」的節依規則算出，引用前用 `ndd.py` 查證 | `init` 自動產生；`ndd.py facts` 重跑，`--full` 看完整版 |
+| `<板>_Architecture.md` | **板卡導覽**——以方塊圖為核心的交接文件 | `init` 自動產生；`ndd.py arch` 重寫（§4） |
+| 其他 md 文件 | 只有使用者明確要求時 | 明確要求 |
+| pinmap / signal_chain CSV | **可重生的衍生物** | 需要時重跑，過期就丟 |
+| `topology_hint.csv` | 功能說明，**不是連通** | 隨 trace 產生 |
+| `verified-pins.csv` | **datasheet 原文快取** + symbol 腳位名 | `pinfn` 自動累積；symbol 列由 `init` 整批重建 |
+| `hier/*_parts.csv` / `hier/*_nodes.csv` | **可重生的衍生物**（`.DSN` 轉出） | `init` 產生；`.DSN` 更新就重跑 |
+| `models.json` | **選用加速器**，不是前提 | 同一顆 IC 追第 2 次以上才值得建 |
+| `export/cis_parts.csv` | **選用加速器**（料件分類快照），不是前提 | 使用者自行從 CIS 唯讀匯出（方式見 `docs/設計說明.md`）；入 `MANIFEST.md` |
+| `MANIFEST.md` | 輸入檔指紋 | 寫文件時 |
+
+**原始來源是資產，結論是拋棄式的。**

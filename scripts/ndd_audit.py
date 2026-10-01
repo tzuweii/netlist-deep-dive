@@ -19,6 +19,7 @@
 import re
 
 import ndd_package
+import ndd_classify
 from ndd_bom import is_ambiguous
 from ndd_graph import Fabric
 from ndd_models import i2c_addr, missing_pins
@@ -35,8 +36,7 @@ def _expand_pins(spec):
 
 
 def is_connector(nl, refdes):
-    fp = (nl.parts.get(refdes) or "").lower()
-    return fp.startswith("conn") or bool(re.match(r"^J\d", refdes))
+    return ndd_classify.is_connector(nl, refdes)
 
 
 def dni_provable(nl, bom, refdes):
@@ -53,7 +53,8 @@ def dni_provable(nl, bom, refdes):
 
 
 def run_assertion(a, nl, bom, models):
-    """回傳 (ok, 實際值字串)。新增 kind 時務必同步更新 references/pitfalls.md。"""
+    """回傳 (ok, 實際值字串)。新增 kind 時務必同步更新 references/verification.md
+    的 kind 對照表。"""
     k = a["kind"]
 
     if k == "count_pn":

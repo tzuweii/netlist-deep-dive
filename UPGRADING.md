@@ -20,7 +20,7 @@ https://github.com/tzuweii/netlist-deep-dive
 使用者常常只說「幫我升級」。**沒拿到路徑就先問**，不要自己猜、不要去掃磁碟。
 
 如果使用者說「我還沒建過專案」，那不是升級，是 `init`，直接跳到 `SKILL.md`
-的 Phase 0。
+的建檔流程（`references/project-lifecycle.md`）。
 
 ## 1. 找到 skill 裝在哪
 

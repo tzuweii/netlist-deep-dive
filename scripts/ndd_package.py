@@ -7,7 +7,7 @@
 文字層把兩個腳號併成一個），要通用地「看懂」表格是無底洞，而且一列錯位就讓
 整張表作廢。實測 NXP 一份 16 腳的表就同時踩到三種。
 
-改用這個工具**已經有的**機制：`mate` 的枚舉排名。三個獨立證據來源，全部來自
+改用**枚舉候選封裝、以證據排名**。三個獨立證據來源，全部來自
 netlist 與 BOM：
 
   1. 拓樸一致性 `[N]` —— 模型宣告的電源/接地腳，實際是不是接在電源/地上
@@ -38,7 +38,7 @@ RESOLVED_OK = (USER_CONFIRMED, SINGLE_CANDIDATE)
 # INFERRED 可用，但會掛 caveat 並列進 REVIEW —— 它是推論不是事實。
 
 ROLE_VALUES = ("GND", "PWR", "SIG")
-MIN_MARGIN = 2                          # 比照 mate：margin 太小就是證據薄弱
+MIN_MARGIN = 2                          # margin 太小就是證據薄弱
 
 
 def role_of_net(cls_fn, net):
