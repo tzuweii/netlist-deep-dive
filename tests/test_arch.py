@@ -503,7 +503,9 @@ class ArchTest(unittest.TestCase):
         nl, bom, hier = _board(self.tmp, parts, nets, pns=pns)
         txt = u"\n".join(A.branch_lines(self._topo(nl, bom, hier)))
         self.assertNotRegex(txt, r"\*\*U1\*\*\.")
-        self.assertEqual(txt.count(u"繞成一圈"), 1)
+        self.assertEqual(txt.count(u"追不下去"), 1)
+        self.assertNotIn(u"圈", txt)
+        self.assertIn(u"U2.2、U3.2", txt)              # 帶腳：看得出接在哪支腳
         self.assertIn(u"**J1**", txt)
 
     def test_bus_nets_do_not_form_chains(self):

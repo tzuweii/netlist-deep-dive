@@ -1439,13 +1439,18 @@ def branch_lines(topo, k=80):
             spin = topo._pin(s, topo.end_pins(s, p[1]))
             if far in p[:-1]:
                 # 走回走過的零件（多半是起點）：一條線掛三顆以上時，其中兩顆
-                # 會被誤當成串在路上而繞成一圈。這不是接到另一個對象——如實
-                # 寫出來，不寫「接到自己」；同一圈從兩頭各走一次，只留一行。
+                # 會被誤當成串在路上而走回來。這不是接到另一個對象——只寫接線
+                # 事實（還有誰、用哪支腳），不寫「接到自己」也不寫「圈」；同一組
+                # 從兩頭各走一次，只留一行。
                 key = (spin, frozenset(p[1:-1]))
                 if key not in loops:
                     loops.add(key)
-                    items.append((spin, sorted((short(x) for x in p[1:-1]),
-                                               key=_natkey), None, None))
+                    mid = []
+                    for x in sorted(p[1:-1], key=_natkey):
+                        ep = topo.end_pins(x, s)
+                        mid.append(short(x) + (u".%s" % topo._pin(x, ep)
+                                               if ep else u""))
+                    items.append((spin, mid, None, None))
                 continue
             fpin = topo._pin(far, topo.end_pins(far, p[-2]))
             items.append((spin, [short(x) for x in p[1:-1]], far, fpin))
@@ -1463,8 +1468,8 @@ def branch_lines(topo, k=80):
         L.append(head + u"：")
         for spin, mid, far, fpin in sorted(items, key=lambda x: _natkey(x[0])):
             if far is None:
-                L.append(u"  - %s ─ %s（這幾顆與它接在同一條線上，繞成一圈，"
-                         u"追不下去；用 `ndd.py` 查）" % (spin, u"、".join(mid)))
+                L.append(u"  - %s ─ %s（這幾顆彼此也相連，工具在這裡追不下去；"
+                         u"之後接到哪裡用 `ndd.py` 查）" % (spin, u"、".join(mid)))
                 continue
             via = (u"（經 %s）" % u"、".join(mid)) if mid else u""
             L.append(u"  - %s ─%s─ **%s**.%s %s" % (spin, via, far, fpin,
